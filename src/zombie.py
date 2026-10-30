@@ -1,0 +1,33 @@
+"""Zombie agent: short fixed-range melee attacker."""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+
+from config.simulation_config import ZOMBIE_ATTACK_RANGE
+from src.agent import Agent
+from utils import combat
+
+
+@dataclass
+class Zombie(Agent):
+    strength: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.strength = max(1, int(self.strength))
+
+    @property
+    def attack_range(self) -> float:
+        """Fixed reach - zombies cannot attack from farther away."""
+        return ZOMBIE_ATTACK_RANGE
+
+    def can_reach(self, distance: float) -> bool:
+        return distance <= self.attack_range
+
+    def roll_damage(self, rng: random.Random) -> int:
+        return combat.zombie_damage(self.strength, rng)
+
+    def special(self) -> int:
+        return self.strength

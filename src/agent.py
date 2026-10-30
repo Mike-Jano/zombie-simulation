@@ -1,0 +1,128 @@
+"""Agent superclass: state and behaviour shared by humans and zombies."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from config.simulation_config import MAP_MAX, MAP_MIN
+
+Bounds = tuple[float, float, float, float]  # min_x, min_y, max_x, max_y
+
+
+def clamp_map(value: float) -> float:
+    return max(float(MAP_MIN), min(float(MAP_MAX), value))
+
+
+@dataclass
+class Agent:
+    """Mirror of one row of the ``agents`` PostgreSQL table."""
+
+    agent_id: int
+    agent_type: str
+    is_alive: bool
+    x_pos: float
+    y_pos: float
+    health: int
+    speed: int
+
+    def __post_init__(self) -> None:
+        self.x_pos = clamp_map(self.x_pos)
+        self.y_pos = clamp_map(self.y_pos)
+        self.health = max(0, int(self.health))
+        if self.health == 0:
+            self.is_alive = False
+
+    # ------------------------------------------------------------------ #
+    # Geometry
+    # ------------------------------------------------------------------ #
+    @property
+    def position(self) -> tuple[float, float]:
+        return (self.x_pos, self.y_pos)
+
+    def distance_to(self, other: "Agent") -> float:
+        return math.hypot(other.x_pos - self.x_pos, other.y_pos - self.y_pos)
+
+    def distance_to_point(self, x: float, y: float) -> float:
+        return math.hypot(x - self.x_pos, y - self.y_pos)
+
+    def move_toward(
+        self,
+        target_x: float,
+        target_y: float,
+        stop_distance: float = 0.0,
+        bounds: Bounds | None = None,
+    ) -> float:
+        """Walk up to ``speed`` units toward a point, never leaving bounds.
+
+        Returns the distance actually travelled (used to detect stuck agents).
+        """
+        if not self.is_alive:
+            return 0.0
+
+        dx = target_x - self.x_pos
+        dy = target_y - self.y_pos
+        distance = math.hypot(dx, dy)
+        if distance <= stop_distance or distance == 0.0:
+            return 0.0
+
+        travel = min(float(self.speed), distance - stop_distance)
+        if travel <= 0.0:
+            return 0.0
+
+        ux, uy = dx / distance, dy / distance
+        new_x = self.x_pos + ux * travel
+        new_y = self.y_pos + uy * travel
+
+        if bounds is not None:
+            min_x, min_y, max_x, max_y = bounds
+            new_x = min_max(new_x, min_x, max_x)
+            new_y = min_max(new_y, min_y, max_y)
+
+        new_x = clamp_map(new_x)
+        new_y = clamp_map(new_y)
+
+        moved = math.hypot(new_x - self.x_pos, new_y - self.y_pos)
+        self.x_pos, self.y_pos = new_x, new_y
+        return moved
+
+    # ------------------------------------------------------------------ #
+    # Damage
+    # ------------------------------------------------------------------ #
+    def take_damage(self, damage: int) -> None:
+        if not self.is_alive or damage <= 0:
+            return
+        self.health -= int(damage)
+        if self.health <= 0:
+            self.health = 0
+            self.is_alive = False
+
+    # ------------------------------------------------------------------ #
+    # Reporting
+    # ------------------------------------------------------------------ #
+    def snapshot(self) -> tuple:
+        """Compact tuple consumed by the visualisers."""
+        return (
+            self.agent_id,
+            self.agent_type,
+            round(self.x_pos, 1),
+            round(self.y_pos, 1),
+            int(self.health),
+            bool(self.is_alive),
+            int(self.special()),
+        )
+
+    def special(self) -> int:
+        """Subtable stat (weapon tier / strength) - overridden."""
+        return 0
+
+    def __str__(self) -> str:
+        state = "alive" if self.is_alive else "dead"
+        return (
+            f"{self.agent_type}#{self.agent_id} ({self.x_pos:.1f}, "
+            f"{self.y_pos:.1f}) hp={self.health} {state}"
+        )
+
+
+def min_max(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))

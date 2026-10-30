@@ -1,0 +1,115 @@
+"""Central tuning knobs for the zombie simulation.
+
+Everything here can be edited without touching the simulation code.
+"""
+
+# --------------------------------------------------------------------------- #
+# Map
+# --------------------------------------------------------------------------- #
+MAP_MIN = -1000
+MAP_MAX = 1000
+MAP_SPAN = MAP_MAX - MAP_MIN   # derived; never set this by hand
+
+# --------------------------------------------------------------------------- #
+# Sectoring
+# --------------------------------------------------------------------------- #
+# The map is split into one sector per this many living agents:
+#
+#     sectors = clamp(ceil(agents / AGENTS_PER_SECTOR), 1, MAX_SECTORS)
+#
+# 200 agents -> 1 sector, 1500 -> 3, 3000 -> 6. Fewer, larger sectors are what
+# let humans and zombies actually meet: a finely split map can leave whole
+# sectors with only one type, which is how a run used to end with both sides
+# still alive. Raise MAX_SECTORS to use more cores at the cost of smaller
+# arenas; set SECTOR_COUNT to pin the count for an exact reproduction.
+AGENTS_PER_SECTOR = 500
+MAX_SECTORS = 12
+# A sector's walkable bounding box is the cluster's bounding box expanded by
+# this many map units (clamped to the map). Agents never leave their sector.
+SECTOR_PADDING = 25.0
+
+# 0 = sectors follow the population rule above. Any other value pins the count
+# (bounded by MAX_SECTORS), which is how a run is reproduced exactly.
+SECTOR_COUNT = 0
+
+# If a round ends with both sides alive and nothing happened at all (no attack,
+# no movement), the next round is run as one single sector instead of stopping
+# the simulation. With both types in one arena every tick either lands a hit or
+# closes a distance, so the run can only finish when one side is wiped out.
+COLLAPSE_ON_STAGNATION = True
+
+# --------------------------------------------------------------------------- #
+# Parallelism
+# --------------------------------------------------------------------------- #
+# 0 = auto: one worker per usable CPU (affinity/cgroup aware), capped by
+# MAX_WORKERS. Set to 1 to force the old single-core behaviour.
+WORKERS = 0
+# Sector count caps parallel width, so there is no point going wider than the
+# number of sectors the population produces.
+MAX_WORKERS = 12
+
+# "auto"   -> processes on normal CPython (the GIL blocks parallel threads),
+#             threads on free-threaded builds, single-threaded when 1 CPU.
+# "serial" -> never use a pool.
+# "thread" -> force threads (useful for profiling / DB-bound runs).
+# "process"-> force a process pool.
+WORKER_BACKEND = "auto"
+
+# --------------------------------------------------------------------------- #
+# Simulation loop
+# --------------------------------------------------------------------------- #
+# A sector runs for at most this many ticks before the map is re-clustered and
+# the sectors are rebuilt from the agents' CURRENT positions. Lower = sectors
+# follow the action more closely, higher = fewer database round trips.
+SECTOR_REFRESH_TICKS = 15
+
+# Hard safety nets. A run can never exceed these, so it can never hang.
+MAX_ROUNDS = 400
+MAX_TOTAL_TICKS = 6000
+
+# Absolute per-sector-visit cap (never exceeded even if SECTOR_REFRESH_TICKS is
+# raised above it).
+MAX_ITERATIONS_PER_SECTOR = 2000
+
+# Stop a sector when the closest human/zombie pair has not got any closer for
+# this many ticks. This is what prevents a sector that never engages from
+# grinding on forever - it works whether or not combat has started.
+STALL_PATIENCE = 8
+
+# After combat has started, stop once this many consecutive iterations pass
+# without a single attack ("until no combat happens").
+NO_COMBAT_PATIENCE = 5
+
+# --------------------------------------------------------------------------- #
+# Combat
+# --------------------------------------------------------------------------- #
+# Zombies: fixed reach, no accuracy roll. Damage is strength-scaled.
+ZOMBIE_ATTACK_RANGE = 2.5
+ZOMBIE_STOP_DISTANCE = 1.0
+ZOMBIE_DAMAGE_PER_STRENGTH = (5, 15)  # randint(strength*5, strength*15)
+
+# Humans: reach scales with weapon tier, damage is random per tier and shots
+# can miss - the farther away the target, the lower the hit chance. A human
+# walks until the target is inside its range and then holds there, firing.
+HUMAN_RANGE_PER_TIER = 4          # tier 4 -> 12 units
+HUMAN_DAMAGE_PER_TIER = (3, 9)       # randint(tier*3, tier*9)
+HUMAN_HIT_BASE = 0.9                # point-blank accuracy
+HUMAN_HIT_FALLOFF = 0.045            # accuracy lost per unit per tier
+HUMAN_HIT_FLOOR = 0.05
+
+# --------------------------------------------------------------------------- #
+# Spawn stats
+# --------------------------------------------------------------------------- #
+HUMAN_HEALTH_RANGE = (80, 150)
+HUMAN_SPEED_RANGE = (1, 6)
+HUMAN_WEAPON_TIER_RANGE = (1, 5)
+
+ZOMBIE_HEALTH_RANGE = (50, 200)
+ZOMBIE_SPEED_RANGE = (2, 5)
+ZOMBIE_STRENGTH_RANGE = (2, 5)
+
+# --------------------------------------------------------------------------- #
+# Presentation
+# --------------------------------------------------------------------------- #
+MAX_FRAMES = 20000           # safety cap for HTML frame capture
+HTML_OUTPUT_DIR = "output"
