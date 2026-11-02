@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 
 from config import simulation_config as cfg
+from src.human import Human
+from src.zombie import Zombie
 
 def _random_position(rng: random.Random) -> tuple[int, int]:
     return (
@@ -47,3 +49,26 @@ def generate_spawns(
         )
 
     return specs
+
+
+def build_agents(
+    humans: int, zombies: int, rng: random.Random | None = None
+) -> list[Human | Zombie]:
+    """Build in-memory agents from :func:`generate_spawns` (tests, benchmark)."""
+    rng = rng or random.Random()
+    agents: list[Human | Zombie] = []
+    for index, spec in enumerate(generate_spawns(humans, zombies, rng), start=1):
+        common = {
+            "agent_id": index,
+            "agent_type": spec["agent_type"],
+            "is_alive": True,
+            "x_pos": spec["x_pos"],
+            "y_pos": spec["y_pos"],
+            "health": spec["health"],
+            "speed": spec["speed"],
+        }
+        if spec["agent_type"] == "human":
+            agents.append(Human(**common, weapon_tier=spec["weapon_tier"]))
+        else:
+            agents.append(Zombie(**common, strength=spec["strength"]))
+    return agents

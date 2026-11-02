@@ -9,6 +9,11 @@ The randomness is seeded per sector visit via :func:`derive_seed`.  That is
 what makes a run reproducible regardless of how many workers execute it: a
 sector always sees the same random stream whether it ran first, last, alone or
 in a pool.
+
+Parallelism inside a sector is deliberately limited to *planning*: workers
+compute movement deltas and attack targets from a read-only snapshot, and the
+engine applies them in canonical order.  RNG draws and damage resolution stay
+on one thread, so chunking cannot change a seeded run.
 """
 
 from __future__ import annotations
@@ -17,10 +22,13 @@ import hashlib
 import math
 import random
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Mapping
 
 from config import simulation_config as cfg
 from src.agent import Agent
+from src.tick_executor import chunked, make_executor
+from utils.spatial import SpatialIndex
 
 _U64 = 0xFFFF_FFFF_FFFF_FFFF
 
@@ -63,19 +71,125 @@ class SectorOutcome:
     report: SectorReport
     moved: float = 0.0
     frames: list = field(default_factory=list)
+    # (agent_id, agent_type, x, y, is_alive) for every agent the visit owned.
+    # The orchestrator can cluster the next round from these instead of doing
+    # another full SELECT, as long as the values match what was written to the
+    # database (see ``Simulation._next_rows``).
+    final_states: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MovePlan:
+    """A movement computed from a snapshot, not yet applied."""
+
+    agent_id: int
+    new_x: float
+    new_y: float
+    moved: float
+    gap: float
+
+
+@dataclass(frozen=True)
+class AttackPlan:
+    """The nearest enemy of one attacker, computed from a snapshot."""
+
+    attacker_id: int
+    target_id: int
+    distance: float
+
+
+def _flatten(chunks):
+    for chunk in chunks:
+        yield from chunk
+
+
+def shard_parts(count: int, shards: int, chunk_size: int = 0) -> int:
+    """How many chunks to split ``count`` agents into.
+
+    ``chunk_size`` is a load-balancing cap: it can raise the chunk count but
+    never lowers it below the requested shard count.
+    """
+    parts = max(1, int(shards or 1))
+    if chunk_size:
+        parts = max(parts, math.ceil(count / chunk_size))
+    return max(1, min(parts, max(1, count)))
+
+
+# --------------------------------------------------------------------------- #
+# Plan functions (safe to run on a worker thread)
+# --------------------------------------------------------------------------- #
+def _plan_human_moves(agents, index: SpatialIndex, bounds):
+    plans = []
+    for human in agents:
+        if not human.is_alive:
+            continue
+        target, distance = index.nearest(human.x_pos, human.y_pos)
+        if target is None:
+            continue
+        new_x, new_y, moved = human.planned_move(
+            target.x_pos,
+            target.y_pos,
+            stop_distance=min(human.hold_distance, distance),
+            bounds=bounds,
+        )
+        plans.append(MovePlan(human.agent_id, new_x, new_y, moved, distance))
+    return plans
+
+
+def _plan_zombie_moves(agents, index: SpatialIndex, bounds):
+    plans = []
+    for zombie in agents:
+        if not zombie.is_alive:
+            continue
+        target, distance = index.nearest(zombie.x_pos, zombie.y_pos)
+        if target is None:
+            continue
+        new_x, new_y, moved = zombie.planned_move(
+            target.x_pos,
+            target.y_pos,
+            stop_distance=min(cfg.ZOMBIE_STOP_DISTANCE, distance),
+            bounds=bounds,
+        )
+        plans.append(MovePlan(zombie.agent_id, new_x, new_y, moved, distance))
+    return plans
+
+
+def _plan_attacks(agents, index: SpatialIndex):
+    plans = []
+    for agent in agents:
+        if not agent.is_alive:
+            continue
+        target, distance = index.nearest(agent.x_pos, agent.y_pos)
+        if target is None:
+            continue
+        plans.append(AttackPlan(agent.agent_id, target.agent_id, distance))
+    return plans
 
 
 # --------------------------------------------------------------------------- #
 # Engine
 # --------------------------------------------------------------------------- #
 class SectorEngine:
-    def __init__(self, max_ticks: int | None = None, capture_frames: bool = False):
+    def __init__(
+        self,
+        max_ticks: int | None = None,
+        capture_frames: bool = False,
+        event_shards: int = 1,
+        chunk_size: int | None = None,
+        frame_interval: int | None = None,
+    ):
         if max_ticks is None:
             max_ticks = max(
                 1, min(cfg.SECTOR_REFRESH_TICKS, cfg.MAX_ITERATIONS_PER_SECTOR)
             )
         self.max_ticks = int(max_ticks)
         self.capture_frames = bool(capture_frames)
+        self.event_shards = max(1, int(event_shards or 1))
+        # 0/None = split into at most ``event_shards`` even chunks.
+        raw_chunk = cfg.EVENT_CHUNK_SIZE if chunk_size is None else chunk_size
+        self.chunk_size = max(0, int(raw_chunk or 0))
+        raw_interval = cfg.FRAME_INTERVAL if frame_interval is None else frame_interval
+        self.frame_interval = max(1, int(raw_interval or 1))
 
     # ------------------------------------------------------------------ #
     def run(
@@ -132,45 +246,65 @@ class SectorEngine:
         iteration = 0
         report.stop_reason = "tick budget"
 
-        while iteration < self.max_ticks:
-            iteration += 1
+        executor = make_executor(self.event_shards)
+        try:
+            while iteration < self.max_ticks:
+                iteration += 1
 
-            moved, gap = self._movement_phase(sector, humans, zombies)
-            moved_total += moved
-            events, attacks = self._combat_phase(humans, zombies, rng)
+                moved, gap = self._movement_phase(
+                    sector,
+                    humans,
+                    zombies,
+                    executor,
+                    self.event_shards,
+                    self.chunk_size,
+                )
+                moved_total += moved
+                events, attacks = self._combat_phase(
+                    sector,
+                    humans,
+                    zombies,
+                    rng,
+                    executor,
+                    self.event_shards,
+                    self.chunk_size,
+                    collect_events=self.capture_frames,
+                )
 
-            alive_h = sum(1 for agent in humans.values() if agent.is_alive)
-            alive_z = sum(1 for agent in zombies.values() if agent.is_alive)
+                alive_h = sum(1 for agent in humans.values() if agent.is_alive)
+                alive_z = sum(1 for agent in zombies.values() if agent.is_alive)
 
-            report.attacks += attacks
-            if attacks:
-                combat_started = True
-                quiet_iterations = 0
-                stall_iterations = 0
-                best_gap = float("inf")
-            else:
-                quiet_iterations += 1
-                # Has the closest human/zombie pair got any closer?
-                if gap < best_gap - 1e-9:
-                    best_gap = gap
+                report.attacks += attacks
+                if attacks:
+                    combat_started = True
+                    quiet_iterations = 0
                     stall_iterations = 0
+                    best_gap = float("inf")
                 else:
-                    stall_iterations += 1
+                    quiet_iterations += 1
+                    # Has the closest human/zombie pair got any closer?
+                    if gap < best_gap - 1e-9:
+                        best_gap = gap
+                        stall_iterations = 0
+                    else:
+                        stall_iterations += 1
 
-            self._emit(*context, iteration, events, attacks > 0)
+                self._emit(*context, iteration, events, attacks > 0)
 
-            if alive_h == 0 or alive_z == 0:
-                report.stop_reason = "one side eliminated"
-                break
-            if attacks == 0 and moved < 1e-6:
-                report.stop_reason = "no combat, no movement"
-                break
-            if attacks == 0 and stall_iterations >= cfg.STALL_PATIENCE:
-                report.stop_reason = "no progress"
-                break
-            if combat_started and quiet_iterations >= cfg.NO_COMBAT_PATIENCE:
-                report.stop_reason = "no combat"
-                break
+                if alive_h == 0 or alive_z == 0:
+                    report.stop_reason = "one side eliminated"
+                    break
+                if attacks == 0 and moved < 1e-6:
+                    report.stop_reason = "no combat, no movement"
+                    break
+                if attacks == 0 and stall_iterations >= cfg.STALL_PATIENCE:
+                    report.stop_reason = "no progress"
+                    break
+                if combat_started and quiet_iterations >= cfg.NO_COMBAT_PATIENCE:
+                    report.stop_reason = "no combat"
+                    break
+        finally:
+            executor.close()
 
         report.humans_end = sum(1 for agent in humans.values() if agent.is_alive)
         report.zombies_end = sum(1 for agent in zombies.values() if agent.is_alive)
@@ -184,133 +318,195 @@ class SectorEngine:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _movement_phase(
-        sector, humans: Mapping[int, Agent], zombies: Mapping[int, Agent]
+        sector,
+        humans: Mapping[int, Agent],
+        zombies: Mapping[int, Agent],
+        executor=None,
+        shards: int = 1,
+        chunk_size: int = 0,
     ) -> tuple[float, float]:
         """Every living agent walks toward its nearest living enemy.
 
-        Humans walk only until their target is inside weapon range, then hold
-        and fire from there. Zombies keep closing to ``ZOMBIE_STOP_DISTANCE``.
+        Humans move first against the pre-move zombie snapshot; zombies then
+        move against the post-human snapshot.  That is the same order the
+        serial loop always used, and it lets each group run in parallel because
+        nobody in a group reads another mover's new position.
 
         Returns ``(total distance moved, distance to the closest enemy pair)``.
         The second value feeds the stall detector, so a sector that cannot make
         progress is stopped even if combat never started.
         """
-        moved_total = 0.0
-        closest_gap = float("inf")
-        bounds = sector.bounds
+        owned = executor is None
+        if owned:
+            executor = make_executor(shards)
+        try:
+            humans_list = list(humans.values())
+            zombies_list = list(zombies.values())
+            moved_total = 0.0
+            closest_gap = float("inf")
+            bounds = getattr(sector, "bounds", None)
 
-        for human in humans.values():
-            if not human.is_alive:
-                continue
-            target, distance = SectorEngine._nearest(human, zombies.values())
-            if target is None:
-                continue
-            closest_gap = min(closest_gap, distance)
-            moved_total += human.move_toward(
-                target.x_pos,
-                target.y_pos,
-                stop_distance=min(human.hold_distance, distance),
-                bounds=bounds,
+            # Humans: read-only zombie positions from before this tick's moves.
+            zombie_index = SpatialIndex(zombies_list, bounds=bounds)
+            human_planner = partial(
+                _plan_human_moves, index=zombie_index, bounds=bounds
             )
+            for plans in executor.map(
+                human_planner,
+                chunked(humans_list, shard_parts(len(humans_list), shards, chunk_size)),
+            ):
+                for plan in plans:
+                    human = humans[plan.agent_id]
+                    human.x_pos = plan.new_x
+                    human.y_pos = plan.new_y
+                    moved_total += plan.moved
+                    if plan.gap < closest_gap:
+                        closest_gap = plan.gap
 
-        for zombie in zombies.values():
-            if not zombie.is_alive:
-                continue
-            target, distance = SectorEngine._nearest(zombie, humans.values())
-            if target is None:
-                continue
-            closest_gap = min(closest_gap, distance)
-            moved_total += zombie.move_toward(
-                target.x_pos,
-                target.y_pos,
-                stop_distance=min(cfg.ZOMBIE_STOP_DISTANCE, distance),
-                bounds=bounds,
+            # Zombies: humans have moved, so rebuild before planning their chase.
+            human_index = SpatialIndex(humans_list, bounds=bounds)
+            zombie_planner = partial(
+                _plan_zombie_moves, index=human_index, bounds=bounds
             )
+            for plans in executor.map(
+                zombie_planner,
+                chunked(zombies_list, shard_parts(len(zombies_list), shards, chunk_size)),
+            ):
+                for plan in plans:
+                    zombie = zombies[plan.agent_id]
+                    zombie.x_pos = plan.new_x
+                    zombie.y_pos = plan.new_y
+                    moved_total += plan.moved
+                    if plan.gap < closest_gap:
+                        closest_gap = plan.gap
 
-        return moved_total, closest_gap
+            return moved_total, closest_gap
+        finally:
+            if owned:
+                executor.close()
 
     @staticmethod
     def _combat_phase(
-        humans: Mapping[int, Agent],
-        zombies: Mapping[int, Agent],
-        rng: random.Random,
+        sector_or_humans,
+        humans_or_zombies,
+        zombies_or_rng,
+        rng: random.Random | None = None,
+        executor=None,
+        shards: int = 1,
+        chunk_size: int = 0,
+        collect_events: bool = True,
     ) -> tuple[list[str], int]:
-        """Resolve every attack from the same snapshot (simultaneous)."""
-        events: list[str] = []
-        damage: dict[int, int] = {}
-        attacks = 0
+        """Resolve every attack from the same snapshot (simultaneous).
 
-        for human in humans.values():
-            if not human.is_alive:
-                continue
-            target, distance = SectorEngine._nearest(human, zombies.values())
-            if target is None or not human.can_reach(distance):
-                continue
+        Targeting is planned in parallel; RNG rolls and damage application are
+        merged in canonical order (humans, then zombies, ascending id) so the
+        random stream is identical to the serial loop.
 
-            attacks += 1
-            if rng.random() <= human.hit_chance(distance):
-                dealt = human.roll_damage(rng)
-                damage[target.agent_id] = damage.get(target.agent_id, 0) + dealt
-                events.append(
-                    f"H{human.agent_id} hit Z{target.agent_id} "
-                    f"for {dealt} (tier {human.weapon_tier}, {distance:.1f}u)"
-                )
-            else:
-                events.append(
-                    f"H{human.agent_id} missed Z{target.agent_id} "
-                    f"(tier {human.weapon_tier}, {distance:.1f}u)"
-                )
-
-        for zombie in zombies.values():
-            if not zombie.is_alive:
-                continue
-            target, distance = SectorEngine._nearest(zombie, humans.values())
-            if target is None or not zombie.can_reach(distance):
-                continue
-
-            attacks += 1
-            dealt = zombie.roll_damage(rng)
-            damage[target.agent_id] = damage.get(target.agent_id, 0) + dealt
-            events.append(
-                f"Z{zombie.agent_id} hit H{target.agent_id} "
-                f"for {dealt} (strength {zombie.strength}, {distance:.1f}u)"
-            )
-
-        # Apply simultaneously - nobody dies before swinging this iteration.
-        if damage:
-            by_id = {
-                agent.agent_id: agent
-                for agent in (*humans.values(), *zombies.values())
-            }
-            for agent_id, total in damage.items():
-                by_id[agent_id].take_damage(total)
-
-        return events, attacks
-
-    @staticmethod
-    def _nearest(agent: Agent, candidates) -> tuple[Agent | None, float]:
-        """Closest living candidate (squared distances inside the loop).
-
-        The inner loop is the hot path of the whole simulation - every agent
-        scans every enemy, every tick - so it compares squared distances with
-        plain locals instead of calling ``distance_to`` (and taking a square
-        root) per candidate. The winner, and therefore the behaviour, is the
-        same.
+        The legacy three-argument form ``_combat_phase(humans, zombies, rng)``
+        is still accepted for the movement tests; the engine passes the sector
+        first so the spatial grid can use its bounds.
         """
-        best: Agent | None = None
-        best_sq = float("inf")
-        ax, ay = agent.x_pos, agent.y_pos
-        for candidate in candidates:
-            if not candidate.is_alive:
-                continue
-            dx = candidate.x_pos - ax
-            dy = candidate.y_pos - ay
-            dist_sq = dx * dx + dy * dy
-            if dist_sq < best_sq:
-                best, best_sq = candidate, dist_sq
-        if best is None:
-            return None, float("inf")
-        return best, math.sqrt(best_sq)
+        if rng is None:
+            sector = None
+            humans = sector_or_humans
+            zombies = humans_or_zombies
+            rng = zombies_or_rng
+        else:
+            sector = sector_or_humans
+            humans = humans_or_zombies
+            zombies = zombies_or_rng
+
+        owned = executor is None
+        if owned:
+            executor = make_executor(shards)
+        try:
+            bounds = getattr(sector, "bounds", None)
+            humans_list = list(humans.values())
+            zombies_list = list(zombies.values())
+
+            human_index = SpatialIndex(humans_list, bounds=bounds)
+            zombie_index = SpatialIndex(zombies_list, bounds=bounds)
+
+            human_plan_chunks = executor.map(
+                partial(_plan_attacks, index=zombie_index),
+                chunked(
+                    humans_list, shard_parts(len(humans_list), shards, chunk_size)
+                ),
+            )
+            zombie_plan_chunks = executor.map(
+                partial(_plan_attacks, index=human_index),
+                chunked(
+                    zombies_list, shard_parts(len(zombies_list), shards, chunk_size)
+                ),
+            )
+            human_plans = _flatten(human_plan_chunks)
+            zombie_plans = _flatten(zombie_plan_chunks)
+
+            events: list[str] = []
+            damage: dict[int, int] = {}
+            attacks = 0
+            human_by_id = {
+                agent.agent_id: agent for agent in humans_list if agent.is_alive
+            }
+            zombie_by_id = {
+                agent.agent_id: agent for agent in zombies_list if agent.is_alive
+            }
+
+            for plan in human_plans:
+                human = human_by_id.get(plan.attacker_id)
+                target = zombie_by_id.get(plan.target_id)
+                if human is None or target is None or not human.can_reach(
+                    plan.distance
+                ):
+                    continue
+
+                attacks += 1
+                if rng.random() <= human.hit_chance(plan.distance):
+                    dealt = human.roll_damage(rng)
+                    damage[target.agent_id] = damage.get(target.agent_id, 0) + dealt
+                    if collect_events:
+                        events.append(
+                            f"H{human.agent_id} hit Z{target.agent_id} "
+                            f"for {dealt} (tier {human.weapon_tier}, "
+                            f"{plan.distance:.1f}u)"
+                        )
+                elif collect_events:
+                    events.append(
+                        f"H{human.agent_id} missed Z{target.agent_id} "
+                        f"(tier {human.weapon_tier}, {plan.distance:.1f}u)"
+                    )
+
+            for plan in zombie_plans:
+                zombie = zombie_by_id.get(plan.attacker_id)
+                target = human_by_id.get(plan.target_id)
+                if zombie is None or target is None or not zombie.can_reach(
+                    plan.distance
+                ):
+                    continue
+
+                attacks += 1
+                dealt = zombie.roll_damage(rng)
+                damage[target.agent_id] = damage.get(target.agent_id, 0) + dealt
+                if collect_events:
+                    events.append(
+                        f"Z{zombie.agent_id} hit H{target.agent_id} "
+                        f"for {dealt} (strength {zombie.strength}, "
+                        f"{plan.distance:.1f}u)"
+                    )
+
+            # Apply simultaneously - nobody dies before swinging this iteration.
+            if damage:
+                by_id = {
+                    agent.agent_id: agent
+                    for agent in (*humans_list, *zombies_list)
+                }
+                for agent_id, total in damage.items():
+                    by_id[agent_id].take_damage(total)
+
+            return events, attacks
+        finally:
+            if owned:
+                executor.close()
 
     # ------------------------------------------------------------------ #
     # Frames
@@ -330,6 +526,15 @@ class SectorEngine:
         note: str = "",
     ) -> None:
         if not self.capture_frames:
+            return
+        # Every Nth tick, plus the first frame and the closing one, keeps the
+        # HTML payload bounded without losing the start/end state.
+        if (
+            self.frame_interval > 1
+            and not ended
+            and iteration > 1
+            and iteration % self.frame_interval
+        ):
             return
 
         snapshot = [

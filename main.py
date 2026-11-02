@@ -82,6 +82,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Pin this to force a particular split"
         ),
     )
+    parser.add_argument(
+        "--event-shards",
+        type=int,
+        default=None,
+        help=(
+            "per-tick shards inside a sector; 0 = auto. Only used by the "
+            "thread backend (free-threaded Python or --backend thread)"
+        ),
+    )
     return parser
 
 
@@ -152,16 +161,34 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
 # --------------------------------------------------------------------------- #
 # Database helpers
 # --------------------------------------------------------------------------- #
+def _print_db_error(exc: psycopg.Error) -> None:
+    print()
+    print("Could not reach PostgreSQL:")
+    print(f"  {str(exc).strip()}")
+    print("Check that the server is running and the settings are correct")
+    print("(option 3), then try again.")
+
+
+def ensure_database(config: dict) -> bool:
+    """Create the configured database if needed; print a friendly error."""
+    try:
+        schema.ensure_database(config)
+    except psycopg.Error as exc:
+        _print_db_error(exc)
+        return False
+    return True
+
+
 def try_bootstrap(config: dict) -> bool:
     try:
-        schema.bootstrap(config)
+        missing = schema.bootstrap(config)
+        if missing:
+            print()
+            print(missing)
+            return False
         stale_bounds = schema.map_bounds_mismatch(config)
     except psycopg.Error as exc:
-        print()
-        print("Could not reach PostgreSQL:")
-        print(f"  {str(exc).strip()}")
-        print("Check that the server is running and the settings are correct")
-        print("(option 3), then try again.")
+        _print_db_error(exc)
         return False
     if stale_bounds:
         print()
@@ -212,11 +239,20 @@ def handle_reset(config: dict) -> None:
     ):
         print("Cancelled.")
         return
+    if not ensure_database(config):
+        return
+    db = DBManager(config)
     try:
+        db.connect()
+        if not db.try_run_lock():
+            print("A simulation is currently using this database. Stop it first.")
+            return
         schema.reset_database(config)
         print("Database cleared and recreated.")
     except psycopg.Error as exc:
         print(f"Reset failed: {exc}")
+    finally:
+        db.close()
 
 
 def handle_status(config: dict) -> None:
@@ -237,19 +273,28 @@ def handle_status(config: dict) -> None:
 
 
 def handle_exit(config: dict) -> None:
+    db = DBManager(config)
     try:
+        db.connect()
+        if not db.try_run_lock():
+            print("A simulation is using the database; its agents were left alone.")
+            return
         removed = schema.clear_agents(config)
         print(f"Cleared {removed} agent(s) from the database. Goodbye.")
     except psycopg.Error as exc:
         print(f"Could not clear agents: {exc}")
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------------------- #
 # Simulation
 # --------------------------------------------------------------------------- #
-def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> None:
-    if not try_bootstrap(config):
-        return
+def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> bool:
+    # The database must exist before DBManager.connect(); the rest of the DDL
+    # runs after the run lock is held so a second starter cannot race it.
+    if not ensure_database(config):
+        return False
 
     batch = bool(args is not None and args.run)
     print()
@@ -258,11 +303,21 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
         humans = max(0, args.humans)
         zombies = max(0, args.zombies)
     else:
-        humans = ask_int("Number of humans", default=40, minimum=0)
-        zombies = ask_int("Number of zombies", default=40, minimum=0)
-    if humans + zombies == 0:
+        humans = ask_int(
+            "Number of humans", default=40, minimum=0, maximum=cfg.MAX_AGENTS
+        )
+        zombies = ask_int(
+            "Number of zombies", default=40, minimum=0, maximum=cfg.MAX_AGENTS
+        )
+    total = humans + zombies
+    if total == 0:
         print("Nothing to simulate - at least one agent is required.")
-        return
+        return False
+    if total > cfg.MAX_AGENTS:
+        print(
+            f"Too many agents: {total} requested, the limit is {cfg.MAX_AGENTS}."
+        )
+        return False
 
     if batch:
         mode = "headless" if args.headless else args.mode
@@ -292,6 +347,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
     workers = args.workers if args is not None else None
     backend = args.backend if args is not None else None
     sectors = args.sectors if args is not None else None
+    event_shards = args.event_shards if args is not None else None
     plan = resolve_plan(workers, backend)
     print(f"  Parallel: {plan.describe()}")
     if sectors:
@@ -301,6 +357,11 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
             "  Sectors per round: auto "
             f"(one per {cfg.AGENTS_PER_SECTOR} agents, "
             f"max {cfg.MAX_SECTORS})"
+        )
+    if plan.backend == "thread":
+        print(
+            "  Event shards: "
+            + (f"{event_shards} (pinned)" if event_shards else "auto")
         )
 
     visualizers = []
@@ -313,6 +374,13 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
     simulation: Simulation | None = None
     try:
         db.connect()
+        if not db.try_run_lock():
+            print()
+            print("Another simulation is already using this database.")
+            print("Stop it before starting a new run.")
+            return False
+        if not try_bootstrap(config):
+            return False
         removed = schema.clear_agents(config)
         if removed:
             print(
@@ -337,6 +405,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
             workers=workers,
             backend=backend,
             sectors=sectors,
+            event_shards=event_shards,
             seed=seed,
         )
         # Let worker start-up overlap with the insert instead of delaying the
@@ -354,6 +423,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> N
                 webbrowser.open(html_visualizer.path.resolve().as_uri())
             except Exception:
                 print("Open the file manually in a browser to watch the run.")
+        return True
     finally:
         if simulation is not None:
             simulation.close()
@@ -371,13 +441,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run:
         try:
-            handle_simulation(config, args)
+            ok = handle_simulation(config, args)
         except KeyboardInterrupt:
             print()
             print("Interrupted - clearing agents from the database.")
             handle_exit(config)
             return 130
-        return 0
+        return 0 if ok else 1
 
     try_bootstrap(config)
 

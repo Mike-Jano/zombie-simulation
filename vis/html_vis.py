@@ -415,8 +415,11 @@ class HtmlVisualizer:
 
     def __init__(self, path: str | Path | None = None):
         if path is None:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = Path(cfg.HTML_OUTPUT_DIR) / f"simulation_{stamp}.html"
+            # Project-relative so the file does not land in whatever directory
+            # the app was started from; microseconds keep runs from colliding.
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            root = Path(__file__).resolve().parents[1]
+            path = root / cfg.HTML_OUTPUT_DIR / f"simulation_{stamp}.html"
         self.path = Path(path)
         self.frames: list[dict] = []
         self.sector_count = 0
@@ -431,11 +434,13 @@ class HtmlVisualizer:
         self.info = info or {}
 
     def frame(self, snapshot: list[tuple], meta: dict) -> None:
+        frame = {"meta": meta, "agents": [list(agent) for agent in snapshot]}
         if len(self.frames) >= cfg.MAX_FRAMES:
+            # The cap must not hide the end of the run.
+            if meta.get("ended") and self.frames:
+                self.frames[-1] = frame
             return
-        self.frames.append(
-            {"meta": meta, "agents": [list(agent) for agent in snapshot]}
-        )
+        self.frames.append(frame)
 
     def finish(self) -> None:
         if self._written:

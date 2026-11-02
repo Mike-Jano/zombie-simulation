@@ -10,13 +10,20 @@ from src.human import Human
 from src.zombie import Zombie
 
 
-# Rows per bulk UPDATE statement. Five parameters per row keeps us far below
-# PostgreSQL's 65535-parameter limit.
+# Rows per bulk statement. Keeps us far below PostgreSQL's 65535-parameter limit.
 _BULK_CHUNK = 1000
+
+# Session-level advisory lock so two simulations cannot share one database.
+RUN_LOCK_KEY = 0x5A4D4249  # "ZMBI"
 
 
 def _clamp_int(value: float) -> int:
     return max(MAP_MIN, min(MAP_MAX, int(round(value))))
+
+
+def _chunks(rows: list, size: int = _BULK_CHUNK):
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
 
 
 class DBManager:
@@ -35,8 +42,23 @@ class DBManager:
 
     def close(self) -> None:
         if self.conn is not None:
+            # Closing the session also releases the advisory run lock.
             self.conn.close()
             self.conn = None
+
+    def try_run_lock(self) -> bool:
+        """Claim this database for one run.
+
+        The lock is session-level, so it is released by :meth:`close` (or when
+        the process dies). A second run gets ``False`` instead of truncating
+        the first run's agents.
+        """
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (RUN_LOCK_KEY,))
+            acquired = bool(cur.fetchone()[0])
+        self.conn.commit()
+        return acquired
 
     def __enter__(self) -> "DBManager":
         return self.connect()
@@ -47,58 +69,98 @@ class DBManager:
     # ------------------------------------------------------------------ #
     # Writes
     # ------------------------------------------------------------------ #
-    def insert_agents(self, specs: list[dict]) -> list[tuple[int, str]]:
-        """Insert agents into the supertable + matching subtable.
+    def insert_agents(self, specs: list[dict]) -> None:
+        """Insert agents into the supertable and the matching subtable.
 
         ``specs`` entries carry the common fields plus ``weapon_tier``
-        (humans) or ``strength`` (zombies). Returns ``(agent_id, type)``.
+        (humans) or ``strength`` (zombies). Rows are inserted in bulk so a
+        large spawn is a handful of statements, not two per agent.
         """
-        created: list[tuple[int, str]] = []
+        if not specs:
+            return
         assert self.conn is not None
         try:
             with self.conn.cursor() as cur:
-                for spec in specs:
+                # RETURNING row order is not guaranteed for a multi-row INSERT,
+                # so allocate the IDs first and pair them with the specs here.
+                cur.execute(
+                    "SELECT pg_get_serial_sequence('agents', 'agent_id')"
+                )
+                sequence = cur.fetchone()[0]
+                if sequence is None:
+                    raise RuntimeError("agents.agent_id has no sequence")
+
+                agent_ids: list[int] = []
+                for chunk in _chunks(specs):
                     cur.execute(
-                        """
-                        INSERT INTO agents
-                            (agent_type, is_alive, x_pos, y_pos, health, speed)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING agent_id
-                        """,
-                        (
-                            spec["agent_type"],
-                            True,
-                            _clamp_int(spec["x_pos"]),
-                            _clamp_int(spec["y_pos"]),
-                            int(spec["health"]),
-                            int(spec["speed"]),
-                        ),
+                        "SELECT nextval(%s::regclass) FROM generate_series(1, %s)",
+                        (sequence, len(chunk)),
                     )
-                    agent_id = cur.fetchone()[0]
-
-                    if spec["agent_type"] == "human":
-                        cur.execute(
-                            """
-                            INSERT INTO humans (agent_id, agent_type, weapon_tier)
-                            VALUES (%s, 'human', %s)
-                            """,
-                            (agent_id, int(spec["weapon_tier"])),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO zombies (agent_id, agent_type, strength)
-                            VALUES (%s, 'zombie', %s)
-                            """,
-                            (agent_id, int(spec["strength"])),
+                    ids = [row[0] for row in cur.fetchall()]
+                    if len(ids) != len(chunk):
+                        raise RuntimeError(
+                            "agent id allocation returned an unexpected row count"
                         )
 
-                    created.append((agent_id, spec["agent_type"]))
+                    placeholders = ", ".join(
+                        ["(%s, %s, %s, %s, %s, %s, %s)"] * len(chunk)
+                    )
+                    params = []
+                    for agent_id, spec in zip(ids, chunk):
+                        params.extend(
+                            (
+                                agent_id,
+                                spec["agent_type"],
+                                True,
+                                _clamp_int(spec["x_pos"]),
+                                _clamp_int(spec["y_pos"]),
+                                int(spec["health"]),
+                                int(spec["speed"]),
+                            )
+                        )
+                    cur.execute(
+                        f"""
+                        INSERT INTO agents
+                            (agent_id, agent_type, is_alive, x_pos, y_pos,
+                             health, speed)
+                        VALUES {placeholders}
+                        """,
+                        params,
+                    )
+                    agent_ids.extend(ids)
+
+                if len(agent_ids) != len(specs):
+                    raise RuntimeError(
+                        "agent insert returned an unexpected row count"
+                    )
+
+                humans = [
+                    (agent_id, int(spec["weapon_tier"]))
+                    for agent_id, spec in zip(agent_ids, specs)
+                    if spec["agent_type"] == "human"
+                ]
+                zombies = [
+                    (agent_id, int(spec["strength"]))
+                    for agent_id, spec in zip(agent_ids, specs)
+                    if spec["agent_type"] == "zombie"
+                ]
+                for table, column, rows in (
+                    ("humans", "weapon_tier", humans),
+                    ("zombies", "strength", zombies),
+                ):
+                    for chunk in _chunks(rows):
+                        placeholders = ", ".join(["(%s, %s)"] * len(chunk))
+                        cur.execute(
+                            f"""
+                            INSERT INTO {table} (agent_id, {column})
+                            VALUES {placeholders}
+                            """,
+                            [value for row in chunk for value in row],
+                        )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
-        return created
 
     def save_agents(self, agents) -> int:
         """Persist the mutable agent state (position, health, alive flag).
@@ -196,6 +258,9 @@ class DBManager:
                 (list(agent_ids),),
             )
             rows = cur.fetchall()
+        # A read-only SELECT would otherwise hold its snapshot for the whole
+        # sector visit; commit now so the connection is not idle in transaction.
+        self.conn.commit()
 
         humans: list[Human] = []
         zombies: list[Zombie] = []

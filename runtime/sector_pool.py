@@ -32,7 +32,6 @@ POOL_FAILURES = (BrokenProcessPool, PicklingError, EOFError, OSError, ImportErro
 
 class SectorPool:
     def __init__(self, backend: str, workers: int, logger=None):
-        self.requested_backend = backend
         self.workers = max(1, int(workers))
         self.backend = "serial"
         self.fallback_reason = ""

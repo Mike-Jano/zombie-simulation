@@ -33,6 +33,7 @@ class SectorTask:
     sectors_in_round: int = 0
     capture_frames: bool = False
     max_ticks: int | None = None
+    event_shards: int = 1
     db_config: dict | None = None
     humans: list[Agent] | None = field(default=None, repr=False)
     zombies: list[Agent] | None = field(default=None, repr=False)
@@ -58,20 +59,6 @@ def worker_db(config: dict) -> DBManager:
         with _LOCK:
             _CONNECTIONS.append(db)
     return db
-
-
-def close_worker() -> None:
-    """Close the current worker's connection, if it has one."""
-    db = getattr(_STATE, "db", None)
-    if db is None:
-        return
-    _STATE.db = None
-    db.close()
-    with _LOCK:
-        try:
-            _CONNECTIONS.remove(db)
-        except ValueError:
-            pass
 
 
 def close_all_connections() -> None:
@@ -104,14 +91,26 @@ def warm_worker(db_config: dict | None = None) -> None:
 # --------------------------------------------------------------------------- #
 # Task entry point
 # --------------------------------------------------------------------------- #
+def _final_states(humans, zombies) -> list[tuple]:
+    """Compact post-visit state used to avoid a full re-SELECT per round."""
+    return [
+        (agent.agent_id, agent.agent_type, agent.x_pos, agent.y_pos, agent.is_alive)
+        for agent in (*humans.values(), *zombies.values())
+    ]
+
+
 def simulate_sector_task(task: SectorTask) -> SectorOutcome:
-    engine = SectorEngine(max_ticks=task.max_ticks, capture_frames=task.capture_frames)
+    engine = SectorEngine(
+        max_ticks=task.max_ticks,
+        capture_frames=task.capture_frames,
+        event_shards=task.event_shards,
+    )
     rng = random.Random(task.seed)
 
     if task.humans is not None or task.zombies is not None:
         humans = {agent.agent_id: agent for agent in (task.humans or [])}
         zombies = {agent.agent_id: agent for agent in (task.zombies or [])}
-        return engine.run(
+        outcome = engine.run(
             task.sector,
             humans,
             zombies,
@@ -119,6 +118,8 @@ def simulate_sector_task(task: SectorTask) -> SectorOutcome:
             round_index=task.round_index,
             sectors_in_round=task.sectors_in_round,
         )
+        outcome.final_states = _final_states(humans, zombies)
+        return outcome
 
     if not task.db_config:
         raise ValueError("SectorTask needs either agent payloads or a db_config")
@@ -136,6 +137,7 @@ def simulate_sector_task(task: SectorTask) -> SectorOutcome:
         round_index=task.round_index,
         sectors_in_round=task.sectors_in_round,
     )
+    outcome.final_states = _final_states(humans, zombies)
 
     # Write the visit back before the worker moves on to the next sector, so
     # the orchestrator's next read sees every sector's result.

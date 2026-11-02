@@ -122,3 +122,41 @@ def resolve_plan(
         cpu_count=count,
         gil_enabled=gil_enabled(),
     )
+
+
+def resolve_event_shards(
+    sector_count: int,
+    workers: int,
+    backend: str,
+    requested: int | None = None,
+) -> int:
+    """How many per-tick shards one sector should split into.
+
+    The outer pool and the inner shards share the same worker budget, so this
+    fills spare capacity without oversubscribing: with 3 sectors and 12 workers
+    each sector gets 4 shards.  Only the thread backend benefits (or is safe to
+    over-subscribe); process and serial backends stay at one shard.
+
+    ``requested`` is the config/CLI override: 0 or ``None`` means auto.
+    """
+    raw = cfg.EVENT_SHARDS if requested is None else requested
+    try:
+        raw = int(raw or 0)
+    except (TypeError, ValueError):
+        raw = 0
+
+    mode = str(cfg.EVENT_PARALLEL or "auto").strip().lower()
+    if mode in ("off", "none", "false", "0"):
+        return 1
+    if backend != "thread":
+        return 1
+
+    sectors = max(1, int(sector_count or 1))
+    budget = max(1, int(workers or 1))
+    if raw > 0:
+        # A pinned count is still bounded by the worker budget: 100k shards
+        # would otherwise mean 100k threads for one sector.
+        return max(1, min(raw, budget))
+
+    outer = min(sectors, budget)
+    return max(1, budget // outer)

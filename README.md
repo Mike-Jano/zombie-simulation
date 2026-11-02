@@ -97,8 +97,9 @@ Database: postgres@localhost:5432/zombie_sim
 
 The HTML player has play/pause, prev/next, restart, a scrub slider, a speed
 selector (0.5x–16x), and keyboard controls (Space, arrow keys). Humans are blue
-and zombies green, each with a health bar above the dot. It embeds every frame,
-so it works offline and can be moved or shared as a single file.
+and zombies green, each with a health bar above the dot. It embeds sampled
+frames (every `FRAME_INTERVAL` ticks, capped at `MAX_FRAMES`, always keeping the
+first and last), so it works offline and can be moved or shared as a single file.
 
 ---
 
@@ -120,6 +121,10 @@ The subtables reference `agents` through the composite key
 
 Dead agents are **never deleted** – `is_alive` is just set to `false`, so the
 database keeps the full history of the run.
+
+Only one simulation can use a database at a time. The app takes a PostgreSQL
+advisory lock for the run and refuses a second run (or a reset) instead of
+truncating the first run's agents.
 
 ### Memory lifecycle
 
@@ -156,19 +161,25 @@ Each tick runs movement, then combat, simultaneously for both sides:
   the tick, then damage is applied together. A zombie killed this tick still
   lands its attack.
 
+Internally each phase is split into **plan** and **apply**: planning reads the
+snapshot and returns per-agent proposals (a move delta or an attack target),
+and only the apply step mutates agents, in ascending `agent_id` order. That
+split is what makes the tick safe to shard without changing behaviour — see
+[Tick-level sharding](#tick-level-sharding-inside-a-sector).
+
 ### Combat rules
 
 | | Humans | Zombies |
 | --- | --- | --- |
 | Range | `weapon_tier * 4` units (4–20) | fixed 2.5 units |
-| Damage | random, `tier*3 … tier*9` | random, `strength*4 … strength*12` |
+| Damage | random, `tier*3 … tier*9` | random, `strength*5 … strength*15` |
 | Accuracy | roll to hit; falls off with distance, higher tier keeps accuracy further out | always hits in range |
 
-A tier-5 human averages 22.5 damage per hit, so a full-health zombie (70–150 HP)
-takes several shots. A zombie averages 24 damage per bite, so a human that lets
-it close usually dies in about five bites. Humans still out-range zombies — they
-get free shots while the horde walks in — but they can no longer mow it down
-before it arrives.
+A tier-5 human averages 30 damage per hit, so a zombie (50–200 HP) takes
+several shots. A zombie's bite averages 10 damage per strength point (30 at
+strength 3, 50 at strength 5), so a human that lets it close usually dies in
+about five bites. Humans still out-range zombies — they get free shots while
+the horde walks in — but they can no longer mow it down before it arrives.
 
 ### End of a sector visit
 
@@ -221,6 +232,53 @@ Nothing here is architecture-specific: no `fork` (unsafe with live psycopg
 connections, and absent on Windows), no CPU affinity calls, no SIMD and no
 third-party packages.
 
+### Tick-level sharding (inside a sector)
+
+Sector-level parallelism runs out of work when the population produces only one
+or two sectors. The engine therefore also shards **one sector's tick** across
+workers:
+
+- movement planning (humans against the pre-move zombie snapshot, then zombies
+  against the post-move human snapshot), and
+- combat targeting (every attacker against the same snapshot),
+
+are split into contiguous chunks of agents and executed by a `thread`
+executor. RNG draws and damage application stay in the serial merge step, so
+chunking can never change a seeded run.
+
+The two levels share **one** worker budget instead of nesting pools:
+
+```
+outer_workers = min(workers, sectors)
+event_shards  = workers // outer_workers
+```
+
+So 12 workers and 3 sectors means 3 outer threads × 4 shards per sector, while
+a single sector gets all 12 shards and no outer pool. Process and serial
+backends always use one shard, because a process already owns a whole sector.
+`--event-shards N` is capped by the worker budget, so a typo cannot create
+thousands of threads. If a stalled round collapses the run to one sector, the
+outer pool is closed and that sector gets the whole thread budget.
+
+Why shards only help on a free-threaded build: on a GIL build the shards run
+correctly but one at a time, so the default (`EVENT_PARALLEL = "auto"`) leaves
+them at 1 unless the resolved backend is `thread`. Pass
+`--backend thread --event-shards N` to try them (or to run DB-bound work).
+
+Shard counts are irrelevant to the result: 1, 2, 3, 4, 8 and 16 shards have
+been verified byte-identical, including frames and database rows.
+`EVENT_CHUNK_SIZE` adds a load-balancing cap (agents per chunk) that only ever
+*raises* the chunk count.
+
+### Finding the nearest enemy
+
+Every agent asks for its closest living enemy twice per tick (movement and
+combat). That used to be an O(n²) scan per sector; it is now answered by a
+uniform-grid `SpatialIndex` (`utils/spatial.py`) in roughly O(1) expected time.
+The index breaks ties on `(distance², agent_id)`, exactly like the old loop, so
+the chosen target is unchanged — `tests/test_spatial.py` checks it against a
+brute-force reference on random, collinear and duplicate layouts.
+
 ### Sectors scale with the population
 
 ```
@@ -260,8 +318,10 @@ python main.py --run --humans 1500 --zombies 1500 --seed 7 --workers 12
 ```
 
 `--sectors N` still pins the count when you want to force a particular split.
-The report and the HTML header record the backend, worker count, sector count
-and seed of the run.
+The report and the HTML header record the backend, worker count, event-shard
+count, sector count and seed of the run. None of `--workers`, `--backend` or
+`--event-shards` changes the result: sharding only reorders *who computes* a
+proposal, never the proposal itself.
 
 ### Measuring
 
@@ -272,10 +332,11 @@ count:
 ```
 python tools/bench_parallel.py --population 1200
 python tools/bench_parallel.py --population 4000 --workers 1,2,4,8,12 --rounds 4
+python tools/bench_parallel.py --population 1200 --backend thread --event-shards 4
 ```
 
 On the reference machine (12 logical CPUs, Windows): 1200 agents make 3 sectors
-and scale 1x → 2.0x on 3 workers. 4000 agents make 8 sectors and reach 5.0x on
+and scale 1x → 2.6x on 3 workers. 4000 agents make 8 sectors and reach 5.0x on
 8 workers. More workers than sectors cannot help, so the benchmark caps each row
 at the sector count and says so. These are in-memory runs that pickle agents
 every round; a real run sends only the sector description (workers load from
@@ -283,10 +344,9 @@ PostgreSQL), so it has less IPC to do.
 
 End to end, with PostgreSQL and spawn/insert included, 3000 agents (seed 7,
 auto sectoring) take **2.8 s single-threaded and 1.3 s on 6 workers**, and the
-run ends with one side at zero. Bigger sectors do more work per tick — nearest
-enemy is an O(n²) scan inside a sector — but the run needs far fewer rounds, so
-the total stays in the same ballpark as the old finely split runs. The worker
-start-up is hidden behind the insert (see below).
+run ends with one side at zero. Bigger sectors do more work per tick, but the
+run needs far fewer rounds, so the total stays in the same ballpark as the old
+finely split runs. The worker start-up is hidden behind the insert (see below).
 
 ### Overlapping start-up
 
@@ -305,14 +365,21 @@ run that cut the pooled time from 2.2 s to 1.2 s when it was introduced.
   population. 3000 agents therefore use at most 6 workers; raising
   `MAX_SECTORS` (or lowering `AGENTS_PER_SECTOR`) buys more cores at the cost of
   smaller arenas and fewer interactions between the two sides.
-- Nearest-enemy search is O(n²) per tick inside a sector, so doubling the agents
-  per sector roughly quadruples the work per tick. This is why sectors are not
-  made arbitrarily large.
-- Clustering and the orchestrator's PostgreSQL reads stay serial; the benchmark
-  prints the clustering cost so it is never mistaken for a worker bottleneck.
+- Nearest-enemy search is grid-accelerated (expected O(1) per query), so a
+  sector's per-tick cost grows roughly linearly with its agents instead of
+  quadratically. Sector size is still bounded by `AGENTS_PER_SECTOR` because
+  bigger arenas mean fewer cross-sector rounds, not because of the scan.
+- After each round the orchestrator clusters from the states the sector visits
+  already reported (`SectorOutcome.final_states`) instead of issuing another
+  `SELECT` over every living agent. The cache applies the same map clamping and
+  integer rounding as `save_agents`, so it is byte-identical to a real re-read;
+  if any sector fails to report, the next round falls back to PostgreSQL.
+- Clustering stays serial; the benchmark prints its cost so it is never
+  mistaken for a worker bottleneck.
 - Headless mode captures no frames at all, so it is the fastest way to run
-  (and the right mode for benchmarks); HTML (`--mode html`) records every frame
-  for the player.
+  (and the right mode for benchmarks); HTML (`--mode html`) records a sampled
+  frame set for the player (every `FRAME_INTERVAL` ticks, capped at
+  `MAX_FRAMES`, with the first and last frame kept).
 - Each worker holds its own PostgreSQL connection (at most `MAX_WORKERS`) and
   sectors write disjoint rows, so workers never contend for a row lock.
 
@@ -337,19 +404,27 @@ src/
   human.py                  Human subclass (weapon_tier)
   zombie.py                 Zombie subclass (strength)
   spawner.py                random stat/position generation
-  sector_engine.py          one sector's ticks (no database, no visualisers)
+  sector_engine.py          one sector's ticks: plan phases + serial apply
   sector_task.py            picklable worker task: load -> simulate -> save
+  tick_executor.py          serial / thread executor for per-tick chunks
   simulation.py             round loop, scheduling, reports
 utils/
   combat.py                 hit chance and damage formulas
   sectoring.py              k-means clustering and the sector-count policy
+  spatial.py                uniform-grid nearest-enemy / radius index
 vis/
   html_vis.py               self-contained HTML player
 tools/
   bench_parallel.py         worker/backend speed-up benchmark
 tests/
   test_parallel.py          sector policy, determinism, backend equivalence
+  test_event_parallel.py    tick sharding, chunk size, frame interval, cache
+  test_spatial.py           spatial index vs brute-force reference
   test_movement.py          humans hold at weapon range, zombies keep closing
+  test_map_bounds.py        config/schema/spawner map bounds
+  test_html_vis.py          HTML frame cap keeps the closing frame
+  test_main.py              CLI population cap, exit codes, reset ordering
+  test_db_integration.py    opt-in real-PostgreSQL data-layer checks
 output/                     generated HTML runs (created on demand)
 plan.txt                    original specification
 ```
@@ -374,6 +449,10 @@ COLLAPSE_ON_STAGNATION = True # stalled round -> one global sector, keep going
 WORKERS = 0                   # 0 = one per usable CPU (capped by MAX_WORKERS)
 MAX_WORKERS = 12              # real width is min(MAX_WORKERS, sectors)
 WORKER_BACKEND = "auto"       # auto | serial | thread | process
+EVENT_PARALLEL = "auto"       # auto | off | thread
+EVENT_SHARDS = 0              # per-sector tick shards; 0 = split the budget
+EVENT_CHUNK_SIZE = 0          # agents per chunk cap; 0 = even split
+FRAME_INTERVAL = 2            # capture every Nth tick (1 = every tick)
 
 # Loop control (all four are what stop the run from freezing)
 SECTOR_REFRESH_TICKS = 15     # re-cluster and rebuild sectors after this many ticks
@@ -385,7 +464,7 @@ NO_COMBAT_PATIENCE = 5
 
 ZOMBIE_ATTACK_RANGE = 2.5
 ZOMBIE_STOP_DISTANCE = 1.0
-ZOMBIE_DAMAGE_PER_STRENGTH = (4, 12)
+ZOMBIE_DAMAGE_PER_STRENGTH = (5, 15)
 
 HUMAN_RANGE_PER_TIER = 4
 HUMAN_DAMAGE_PER_TIER = (3, 9)
@@ -400,12 +479,13 @@ ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
 ZOMBIE_STRENGTH_RANGE = (2, 5)
 
-MAX_FRAMES = 20000
+MAX_AGENTS = 100000           # hard cap on one run's population
+MAX_FRAMES = 2000
 ```
 
-Note: `HUMAN_WEAPON_TIER_RANGE`, `HUMAN_HEALTH_RANGE`, `ZOMBIE_STRENGTH_RANGE`
-and the speed ranges are clamped by `CHECK` constraints in the schema, so keep
-tiers and strengths within 1–5.
+Note: only `HUMAN_WEAPON_TIER_RANGE` and `ZOMBIE_STRENGTH_RANGE` are clamped by
+`CHECK` constraints in the schema (tiers and strengths must stay within 1–5).
+The health and speed ranges only shape new spawns.
 
 ### Changing the map size
 
@@ -429,6 +509,7 @@ for benchmarks and for reproducing a run:
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --headless
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --mode html --workers 8
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --sectors 3 --workers 1
+python main.py --run --humans 200 --zombies 200 --seed 7 --backend thread --event-shards 4
 ```
 
 | Flag | Meaning |
@@ -439,6 +520,7 @@ python main.py --run --humans 1500 --zombies 1500 --seed 7 --sectors 3 --workers
 | `--headless` | shorthand for `--mode headless` |
 | `--workers N` | worker threads/processes; `0` = auto |
 | `--backend ...` | `auto`, `serial`, `thread` or `process` |
+| `--event-shards N` | per-tick shards inside a sector; `0` = auto |
 | `--sectors N` | pin the sector count (reproducible runs); `0` = auto |
 
 ---

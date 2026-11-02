@@ -55,6 +55,22 @@ MAX_WORKERS = 12
 # "process"-> force a process pool.
 WORKER_BACKEND = "auto"
 
+# Per-tick event parallelism (inside a sector).  Only meaningful when the outer
+# backend is "thread": on the GIL a worker thread cannot speed up the CPU loop,
+# so the default leaves it off there.  "auto" enables it whenever the resolved
+# outer backend is thread.
+# "auto" | "off" | "thread"
+EVENT_PARALLEL = "auto"
+# Shards per sector; 0 = auto (fill the worker budget without oversubscribing).
+# The result never depends on the shard count: proposals are merged in
+# canonical order and all RNG draws stay in the merge.
+EVENT_SHARDS = 0
+# Optional cap on agents per shard; 0 = let the engine split evenly.
+EVENT_CHUNK_SIZE = 0
+# Capture a visualisation frame every N ticks (1 = every tick).  Higher values
+# shrink the HTML payload for long runs.
+FRAME_INTERVAL = 2
+
 # --------------------------------------------------------------------------- #
 # Simulation loop
 # --------------------------------------------------------------------------- #
@@ -108,8 +124,12 @@ ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
 ZOMBIE_STRENGTH_RANGE = (2, 5)
 
+# Hard cap on one run's population. The spawn list is built in memory before
+# any database write, so a typo must not be able to exhaust the machine.
+MAX_AGENTS = 100_000
+
 # --------------------------------------------------------------------------- #
 # Presentation
 # --------------------------------------------------------------------------- #
-MAX_FRAMES = 20000           # safety cap for HTML frame capture
+MAX_FRAMES = 2000            # safety cap for HTML frame capture
 HTML_OUTPUT_DIR = "output"

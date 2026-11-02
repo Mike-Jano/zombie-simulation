@@ -36,39 +36,30 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Geometry
     # ------------------------------------------------------------------ #
-    @property
-    def position(self) -> tuple[float, float]:
-        return (self.x_pos, self.y_pos)
-
-    def distance_to(self, other: "Agent") -> float:
-        return math.hypot(other.x_pos - self.x_pos, other.y_pos - self.y_pos)
-
-    def distance_to_point(self, x: float, y: float) -> float:
-        return math.hypot(x - self.x_pos, y - self.y_pos)
-
-    def move_toward(
+    def planned_move(
         self,
         target_x: float,
         target_y: float,
         stop_distance: float = 0.0,
         bounds: Bounds | None = None,
-    ) -> float:
-        """Walk up to ``speed`` units toward a point, never leaving bounds.
+    ) -> tuple[float, float, float]:
+        """Compute a move without mutating the agent.
 
-        Returns the distance actually travelled (used to detect stuck agents).
+        Returns ``(new_x, new_y, moved)``.  Keeping the arithmetic in one place
+        lets the parallel movement phase apply moves in a deterministic order.
         """
         if not self.is_alive:
-            return 0.0
+            return self.x_pos, self.y_pos, 0.0
 
         dx = target_x - self.x_pos
         dy = target_y - self.y_pos
         distance = math.hypot(dx, dy)
         if distance <= stop_distance or distance == 0.0:
-            return 0.0
+            return self.x_pos, self.y_pos, 0.0
 
         travel = min(float(self.speed), distance - stop_distance)
         if travel <= 0.0:
-            return 0.0
+            return self.x_pos, self.y_pos, 0.0
 
         ux, uy = dx / distance, dy / distance
         new_x = self.x_pos + ux * travel
@@ -83,8 +74,7 @@ class Agent:
         new_y = clamp_map(new_y)
 
         moved = math.hypot(new_x - self.x_pos, new_y - self.y_pos)
-        self.x_pos, self.y_pos = new_x, new_y
-        return moved
+        return new_x, new_y, moved
 
     # ------------------------------------------------------------------ #
     # Damage

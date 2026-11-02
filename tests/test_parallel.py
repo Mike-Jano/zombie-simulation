@@ -14,48 +14,17 @@ if str(ROOT) not in sys.path:
 
 from runtime.capabilities import resolve_plan  # noqa: E402
 from runtime.sector_pool import SectorPool  # noqa: E402
-from src.human import Human  # noqa: E402
 from src.sector_engine import derive_seed  # noqa: E402
 from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
 from src.simulation import Simulation  # noqa: E402
-from src.spawner import generate_spawns  # noqa: E402
-from src.zombie import Zombie  # noqa: E402
+from src.spawner import build_agents  # noqa: E402
 from utils.sectoring import build_sectors, resolve_sector_count  # noqa: E402
 
 SEED = 4242
 
 
 def make_agents(humans: int, zombies: int, seed: int = SEED) -> list:
-    rng = random.Random(seed)
-    agents: list = []
-    for index, spec in enumerate(generate_spawns(humans, zombies, rng), start=1):
-        if spec["agent_type"] == "human":
-            agents.append(
-                Human(
-                    agent_id=index,
-                    agent_type="human",
-                    is_alive=True,
-                    x_pos=spec["x_pos"],
-                    y_pos=spec["y_pos"],
-                    health=spec["health"],
-                    speed=spec["speed"],
-                    weapon_tier=spec["weapon_tier"],
-                )
-            )
-        else:
-            agents.append(
-                Zombie(
-                    agent_id=index,
-                    agent_type="zombie",
-                    is_alive=True,
-                    x_pos=spec["x_pos"],
-                    y_pos=spec["y_pos"],
-                    health=spec["health"],
-                    speed=spec["speed"],
-                    strength=spec["strength"],
-                )
-            )
-    return agents
+    return build_agents(humans, zombies, random.Random(seed))
 
 
 def make_tasks(agents, sector_count: int, seed: int = SEED):
@@ -340,6 +309,27 @@ class PoolSizingTests(unittest.TestCase):
             self.assertEqual(simulation.workers, 3)
         finally:
             simulation.close()
+
+    def test_collapse_moves_the_budget_into_the_one_sector(self):
+        simulation = Simulation(object())
+        simulation.plan = resolve_plan(8, "thread")
+        try:
+            simulation._decide_parallel(4)
+            simulation._collapse_to_one_arena()
+            self.assertFalse(simulation._parallel)
+            self.assertEqual(simulation.workers, 1)
+            self.assertEqual(simulation.event_shards, 8)
+        finally:
+            simulation.close()
+
+    def test_collapse_on_a_process_backend_stays_serial(self):
+        simulation = Simulation(object())
+        simulation.plan = resolve_plan(8, "process")
+        simulation._backend_used = "process"
+        simulation._collapse_to_one_arena()
+        self.assertEqual(simulation.workers, 1)
+        self.assertEqual(simulation.event_shards, 1)
+        self.assertEqual(simulation._active_backend(), "serial")
 
 
 class SeedTests(unittest.TestCase):

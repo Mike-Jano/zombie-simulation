@@ -29,48 +29,15 @@ if str(ROOT) not in sys.path:
 from config import simulation_config as cfg  # noqa: E402
 from runtime.capabilities import resolve_plan  # noqa: E402
 from runtime.sector_pool import SectorPool  # noqa: E402
-from src.human import Human  # noqa: E402
 from src.sector_engine import derive_seed  # noqa: E402
 from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
-from src.spawner import generate_spawns  # noqa: E402
-from src.zombie import Zombie  # noqa: E402
+from src.spawner import build_agents  # noqa: E402
 from utils.sectoring import build_sectors, resolve_sector_count  # noqa: E402
 
 
-def build_population(humans: int, zombies: int, seed: int) -> list:
-    rng = random.Random(seed)
-    agents: list = []
-    for index, spec in enumerate(generate_spawns(humans, zombies, rng), start=1):
-        if spec["agent_type"] == "human":
-            agents.append(
-                Human(
-                    agent_id=index,
-                    agent_type="human",
-                    is_alive=True,
-                    x_pos=spec["x_pos"],
-                    y_pos=spec["y_pos"],
-                    health=spec["health"],
-                    speed=spec["speed"],
-                    weapon_tier=spec["weapon_tier"],
-                )
-            )
-        else:
-            agents.append(
-                Zombie(
-                    agent_id=index,
-                    agent_type="zombie",
-                    is_alive=True,
-                    x_pos=spec["x_pos"],
-                    y_pos=spec["y_pos"],
-                    health=spec["health"],
-                    speed=spec["speed"],
-                    strength=spec["strength"],
-                )
-            )
-    return agents
-
-
-def build_tasks(agents, seed: int, sectors: int | None = None):
+def build_tasks(
+    agents, seed: int, sectors: int | None = None, event_shards: int = 1
+):
     positions = {
         agent.agent_id: (float(agent.x_pos), float(agent.y_pos)) for agent in agents
     }
@@ -91,6 +58,7 @@ def build_tasks(agents, seed: int, sectors: int | None = None):
                 round_index=1,
                 sectors_in_round=len(sector_list),
                 capture_frames=False,
+                event_shards=event_shards,
                 humans=[a for a in members if a.agent_type == "human"],
                 zombies=[a for a in members if a.agent_type == "zombie"],
             )
@@ -98,18 +66,27 @@ def build_tasks(agents, seed: int, sectors: int | None = None):
     return tasks, len(sector_list)
 
 
-def measure_serial(pristine, rounds: int) -> tuple[float, int]:
+def _with_shards(tasks, event_shards: int):
+    cloned = copy.deepcopy(tasks)
+    for task in cloned:
+        task.event_shards = event_shards
+    return cloned
+
+
+def measure_serial(pristine, rounds: int, event_shards: int = 1) -> tuple[float, int]:
     """Every timed round starts from the same state, for both backends."""
     started = time.perf_counter()
     ticks = 0
     for _ in range(max(1, rounds)):
-        tasks = copy.deepcopy(pristine)
+        tasks = _with_shards(pristine, event_shards)
         outcomes = [simulate_sector_task(task) for task in tasks]
         ticks += sum(o.report.iterations for o in outcomes)
     return time.perf_counter() - started, ticks
 
 
-def measure_pool(pristine, backend: str, workers: int, rounds: int):
+def measure_pool(
+    pristine, backend: str, workers: int, rounds: int, event_shards: int = 1
+):
     """Steady-state throughput: one pool, many rounds (like a real run)."""
     pool = SectorPool(backend, workers)
     if not pool.active:
@@ -117,13 +94,13 @@ def measure_pool(pristine, backend: str, workers: int, rounds: int):
     try:
         # Warm-up costs are reported separately: pool start + first dispatch.
         warm_started = time.perf_counter()
-        pool.map(copy.deepcopy(pristine))
+        pool.map(_with_shards(pristine, event_shards))
         startup = time.perf_counter() - warm_started
 
         started = time.perf_counter()
         ticks = 0
         for _ in range(max(1, rounds)):
-            outcomes = pool.map(copy.deepcopy(pristine))
+            outcomes = pool.map(_with_shards(pristine, event_shards))
             ticks += sum(o.report.iterations for o in outcomes)
         elapsed = time.perf_counter() - started
     finally:
@@ -166,12 +143,24 @@ def main(argv: list[str] | None = None) -> int:
         default=8,
         help="rounds per repetition, one pool (default 8)",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "thread", "process"),
+        default=None,
+        help="force a pool backend (default: auto from the GIL probe)",
+    )
+    parser.add_argument(
+        "--event-shards",
+        type=int,
+        default=0,
+        help="per-sector tick shards for the pooled rows (0 = one)",
+    )
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args(argv)
 
     humans = max(0, int(round(args.population * args.split)))
     zombies = max(0, args.population - humans)
-    agents = build_population(humans, zombies, args.seed)
+    agents = build_agents(humans, zombies, random.Random(args.seed))
 
     plan = resolve_plan()
     print()
@@ -191,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
     cluster_ms = (time.perf_counter() - started) * 1000
 
     pristine, sector_count = build_tasks(
-        agents, args.seed, sectors=args.sectors
+        agents,
+        args.seed,
+        sectors=args.sectors,
+        event_shards=max(1, args.event_shards),
     )
     sizes = [len(t.humans or []) + len(t.zombies or []) for t in pristine]
     print(
@@ -199,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{min(sizes)}..{max(sizes)} agents each"
     )
     print(f"Clustering: {cluster_ms:.1f} ms per round (serial)")
+    print(f"Shards    : {max(1, args.event_shards)} per sector in pooled rows")
     print()
 
     header = (
@@ -244,10 +237,19 @@ def main(argv: list[str] | None = None) -> int:
                 "  (only one sector)"
             )
             continue
-        backend = "thread" if not plan.gil_enabled else "process"
+        if args.backend and args.backend != "auto":
+            backend = args.backend
+        else:
+            backend = "thread" if not plan.gil_enabled else "process"
         best = None
         for _ in range(max(1, args.repeats)):
-            measured = measure_pool(pristine, backend, workers, rounds)
+            measured = measure_pool(
+                pristine,
+                backend,
+                workers,
+                rounds,
+                event_shards=max(1, args.event_shards),
+            )
             if measured is None:
                 best = None
                 break

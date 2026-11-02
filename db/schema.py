@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS agents (
 """
 
 AGENTS_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_agents_position ON agents (x_pos, y_pos);
+DROP INDEX IF EXISTS idx_agents_position;
 CREATE INDEX IF NOT EXISTS idx_agents_alive ON agents (is_alive);
 """
 
@@ -87,23 +87,30 @@ def ensure_database(config: dict) -> None:
                 (db_name,),
             )
             if cur.fetchone() is None:
-                cur.execute(
-                    sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name))
-                )
+                try:
+                    cur.execute(
+                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name))
+                    )
+                except psycopg.errors.DuplicateDatabase:
+                    # Another starter created it between our check and CREATE.
+                    pass
     finally:
         conn.close()
 
 
 def create_tables(config: dict) -> None:
-    """Create the tables if they are missing."""
+    """Create the tables if they are missing and repair their indexes."""
     conn = psycopg.connect(**connect_params(config))
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute(AGENTS_DDL)
-            cur.execute(AGENTS_INDEXES)
-            cur.execute(HUMANS_DDL)
-            cur.execute(ZOMBIES_DDL)
+            for statement in (AGENTS_DDL, AGENTS_INDEXES, HUMANS_DDL, ZOMBIES_DDL):
+                try:
+                    cur.execute(statement)
+                except psycopg.errors.UniqueViolation:
+                    # Concurrent CREATE ... IF NOT EXISTS can lose the race in
+                    # the catalog. The object exists, so continue.
+                    pass
     finally:
         conn.close()
 
@@ -121,25 +128,68 @@ def drop_tables(config: dict) -> None:
         conn.close()
 
 
-def tables_exist(config: dict) -> bool:
+REQUIRED_COLUMNS = {
+    "agents": ("agent_id", "agent_type", "is_alive", "x_pos", "y_pos", "health", "speed"),
+    "humans": ("agent_id", "agent_type", "weapon_tier"),
+    "zombies": ("agent_id", "agent_type", "strength"),
+}
+
+
+def missing_columns(config: dict) -> str | None:
+    """Report a table that lacks a column this build writes, else ``None``.
+
+    ``CREATE TABLE IF NOT EXISTS`` cannot add columns to an existing table, so
+    a database from an older build has to be recreated once instead of failing
+    at the first insert with a bare ``UndefinedColumn``.
+    """
     conn = psycopg.connect(**connect_params(config))
+    missing: list[str] = []
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT to_regclass('public.agents') IS NOT NULL "
-                "AND to_regclass('public.humans') IS NOT NULL "
-                "AND to_regclass('public.zombies') IS NOT NULL"
-            )
-            return bool(cur.fetchone()[0])
+            for table, required in REQUIRED_COLUMNS.items():
+                # to_regclass follows search_path, unlike the old hard-coded
+                # public/current_schema pair.
+                cur.execute(
+                    "SELECT attname FROM pg_attribute "
+                    "WHERE attrelid = to_regclass(%s) "
+                    "AND attnum > 0 AND NOT attisdropped",
+                    (table,),
+                )
+                present = {row[0] for row in cur.fetchall()}
+                if not present:
+                    # Table is missing; create_tables will make it.
+                    continue
+                missing.extend(
+                    f"{table}.{column}"
+                    for column in required
+                    if column not in present
+                )
     finally:
         conn.close()
 
+    if not missing:
+        return None
+    return (
+        f"The database is missing required column(s): {', '.join(missing)}. "
+        "Choose 2) Clear & recreate database once, then try again."
+    )
 
-def bootstrap(config: dict) -> None:
-    """Make sure the database and all tables exist (non-destructive)."""
+
+def bootstrap(config: dict) -> str | None:
+    """Make sure the database, tables and indexes exist (non-destructive).
+
+    Returns the missing-column message for an old schema, else ``None``. The
+    column check runs before the DDL because the index on ``is_alive`` cannot
+    be created when that column does not exist yet.
+    """
     ensure_database(config)
-    if not tables_exist(config):
-        create_tables(config)
+    missing = missing_columns(config)
+    if missing:
+        return missing
+    # Always run the DDL: the statements are IF NOT EXISTS, so this also
+    # repairs an index dropped from an otherwise valid database.
+    create_tables(config)
+    return None
 
 
 def reset_database(config: dict) -> None:
@@ -169,7 +219,8 @@ def clear_agents(config: dict) -> int:
 
 
 def _agents_table_exists(cur) -> bool:
-    cur.execute("SELECT to_regclass('public.agents') IS NOT NULL")
+    # Unqualified on purpose: the DDL and DML below also follow search_path.
+    cur.execute("SELECT to_regclass('agents') IS NOT NULL")
     return bool(cur.fetchone()[0])
 
 
