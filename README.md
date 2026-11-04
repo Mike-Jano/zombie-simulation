@@ -4,10 +4,6 @@ A 2D agent simulation where human and zombie agents live in PostgreSQL, are
 loaded into Python a sector at a time, fight until one side is wiped out, and
 are written back to the database before being unloaded from memory.
 
-```
-C:\Users\mjano\Documents\Default Project\ZG-Prototype
-```
-
 ---
 
 
