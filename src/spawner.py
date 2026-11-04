@@ -7,23 +7,31 @@ import random
 from config import simulation_config as cfg
 from src.human import Human
 from src.zombie import Zombie
+from utils.sectoring import Bounds, map_bounds_for
 
-def _random_position(rng: random.Random) -> tuple[int, int]:
+
+def _random_position(rng: random.Random, bounds: Bounds) -> tuple[int, int]:
+    min_x, min_y, max_x, max_y = bounds
     return (
-        rng.randint(cfg.MAP_MIN, cfg.MAP_MAX),
-        rng.randint(cfg.MAP_MIN, cfg.MAP_MAX),
+        rng.randint(int(min_x), int(max_x)),
+        rng.randint(int(min_y), int(max_y)),
     )
 
 
 def generate_spawns(
-    humans: int, zombies: int, rng: random.Random | None = None
+    humans: int,
+    zombies: int,
+    rng: random.Random | None = None,
+    map_bounds: Bounds | None = None,
 ) -> list[dict]:
     """Build insert-ready dicts for ``humans`` humans and ``zombies`` zombies."""
     rng = rng or random.Random()
+    if map_bounds is None:
+        map_bounds = map_bounds_for(max(0, humans) + max(0, zombies))
 
     specs: list[dict] = []
     for _ in range(max(0, humans)):
-        x, y = _random_position(rng)
+        x, y = _random_position(rng, map_bounds)
         specs.append(
             {
                 "agent_type": "human",
@@ -36,7 +44,7 @@ def generate_spawns(
         )
 
     for _ in range(max(0, zombies)):
-        x, y = _random_position(rng)
+        x, y = _random_position(rng, map_bounds)
         specs.append(
             {
                 "agent_type": "zombie",

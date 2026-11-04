@@ -39,6 +39,3 @@ class Human(Agent):
 
     def roll_damage(self, rng: random.Random) -> int:
         return combat.human_damage(self.weapon_tier, rng)
-
-    def special(self) -> int:
-        return self.weapon_tier

@@ -5,7 +5,6 @@ from __future__ import annotations
 import psycopg
 
 from config.db_config import connect_params
-from config.simulation_config import MAP_MAX, MAP_MIN
 from src.human import Human
 from src.zombie import Zombie
 
@@ -16,9 +15,15 @@ _BULK_CHUNK = 1000
 # Session-level advisory lock so two simulations cannot share one database.
 RUN_LOCK_KEY = 0x5A4D4249  # "ZMBI"
 
+Bounds = tuple[float, float, float, float]
 
-def _clamp_int(value: float) -> int:
-    return max(MAP_MIN, min(MAP_MAX, int(round(value))))
+
+def _clamp_int(value: float, bounds: Bounds | None = None) -> int:
+    rounded = int(round(value))
+    if bounds is None:
+        # No run bounds supplied (status/reset/tests): store the rounded value.
+        return rounded
+    return max(int(bounds[0]), min(int(bounds[2]), rounded))
 
 
 def _chunks(rows: list, size: int = _BULK_CHUNK):
@@ -29,8 +34,9 @@ def _chunks(rows: list, size: int = _BULK_CHUNK):
 class DBManager:
     """Thin data-access layer used by the simulation."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, map_bounds: Bounds | None = None):
         self.config = config
+        self.map_bounds = map_bounds
         self.conn = None
 
     # ------------------------------------------------------------------ #
@@ -112,8 +118,8 @@ class DBManager:
                                 agent_id,
                                 spec["agent_type"],
                                 True,
-                                _clamp_int(spec["x_pos"]),
-                                _clamp_int(spec["y_pos"]),
+                                _clamp_int(spec["x_pos"], self.map_bounds),
+                                _clamp_int(spec["y_pos"], self.map_bounds),
                                 int(spec["health"]),
                                 int(spec["speed"]),
                             )
@@ -176,8 +182,8 @@ class DBManager:
             (
                 int(agent.agent_id),
                 bool(agent.is_alive),
-                _clamp_int(agent.x_pos),
-                _clamp_int(agent.y_pos),
+                _clamp_int(agent.x_pos, self.map_bounds),
+                _clamp_int(agent.y_pos, self.map_bounds),
                 max(0, int(agent.health)),
             )
             for agent in agents

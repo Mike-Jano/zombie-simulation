@@ -155,10 +155,11 @@ def resolve_event_shards(
 
     sectors = max(1, int(sector_count or 1))
     budget = max(1, int(workers or 1))
-    if raw > 0:
-        # A pinned count is still bounded by the worker budget: 100k shards
-        # would otherwise mean 100k threads for one sector.
-        return max(1, min(raw, budget))
-
     outer = min(sectors, budget)
+    if raw > 0:
+        # A pinned count is still bounded by this sector's share of the worker
+        # budget: 12 sectors x 12 pinned shards would mean 144 threads on 12
+        # CPUs.
+        return max(1, min(raw, budget // outer))
+
     return max(1, budget // outer)

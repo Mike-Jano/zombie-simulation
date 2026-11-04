@@ -7,6 +7,7 @@ import random
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,11 +17,11 @@ if str(ROOT) not in sys.path:
 from config import simulation_config as cfg  # noqa: E402
 from runtime.capabilities import resolve_event_shards, resolve_plan  # noqa: E402
 from src.human import Human  # noqa: E402
-from src.sector_engine import derive_seed  # noqa: E402
-from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
+from src.sector_engine import SectorEngine  # noqa: E402
+from src.sector_task import build_sector_tasks, simulate_sector_task  # noqa: E402
 from src.simulation import Simulation  # noqa: E402
 from src.spawner import build_agents  # noqa: E402
-from utils.sectoring import build_sectors  # noqa: E402
+from utils.sectoring import map_bounds_for  # noqa: E402
 
 SEED = 4242
 
@@ -30,29 +31,9 @@ def make_agents(humans: int, zombies: int, seed: int = SEED) -> list:
 
 
 def make_tasks(agents, sector_count: int, seed: int = SEED, frames: bool = False):
-    positions = {
-        agent.agent_id: (float(agent.x_pos), float(agent.y_pos)) for agent in agents
-    }
-    types = {agent.agent_id: agent.agent_type for agent in agents}
-    sectors = build_sectors(
-        positions, rng=random.Random(seed), target_k=sector_count, types=types
+    return build_sector_tasks(
+        agents, seed, sector_count, capture_frames=frames
     )
-    by_id = {agent.agent_id: agent for agent in agents}
-    tasks = []
-    for sector in sectors:
-        members = [by_id[agent_id] for agent_id in sector.agent_ids]
-        tasks.append(
-            SectorTask(
-                sector=sector,
-                seed=derive_seed(seed, sector.index),
-                round_index=1,
-                sectors_in_round=len(sectors),
-                capture_frames=frames,
-                humans=[a for a in members if a.agent_type == "human"],
-                zombies=[a for a in members if a.agent_type == "zombie"],
-            )
-        )
-    return tasks
 
 
 def run_shards(humans, zombies, sectors, seed, shards, frames=False):
@@ -134,13 +115,13 @@ class EventShardPolicyTests(unittest.TestCase):
         cfg.EVENT_PARALLEL = "auto"
         cfg.EVENT_SHARDS = 0
         self.assertEqual(resolve_event_shards(1, 8, "thread", requested=5), 5)
-        self.assertEqual(resolve_event_shards(4, 8, "thread", requested=3), 3)
+        self.assertEqual(resolve_event_shards(4, 12, "thread", requested=3), 3)
 
     def test_explicit_shards_are_capped_by_the_worker_budget(self):
         cfg.EVENT_PARALLEL = "auto"
         cfg.EVENT_SHARDS = 0
         self.assertEqual(resolve_event_shards(1, 8, "thread", requested=1000), 8)
-        self.assertEqual(resolve_event_shards(4, 8, "thread", requested=1000), 8)
+        self.assertEqual(resolve_event_shards(4, 8, "thread", requested=1000), 2)
 
     def test_off_means_one(self):
         cfg.EVENT_PARALLEL = "off"
@@ -192,6 +173,30 @@ class ChunkingAndFrameTests(unittest.TestCase):
 
     def tearDown(self):
         cfg.EVENT_CHUNK_SIZE, cfg.FRAME_INTERVAL = self._saved
+
+    def test_frames_contain_only_living_agents(self):
+        engine = SectorEngine(capture_frames=True, frame_interval=1)
+        humans = {
+            1: Human(1, "human", True, 0.0, 0.0, 100, 1, 1),
+            2: Human(2, "human", False, 0.0, 0.0, 0, 1, 1),
+        }
+        zombie = make_agents(0, 1)[0]
+        zombie.agent_id = 3
+        zombies = {3: zombie}
+        frames: list = []
+        engine._emit(
+            SimpleNamespace(index=1, size=2, bounds=(-50.0, -50.0, 50.0, 50.0)),
+            humans,
+            zombies,
+            1,
+            1,
+            frames,
+            1,
+            [],
+            False,
+        )
+        ids = {agent[0] for agent in frames[0][0]}
+        self.assertEqual(ids, {1, 3})
 
     def test_chunk_size_does_not_change_the_sector(self):
         cfg.FRAME_INTERVAL = 1
@@ -288,8 +293,7 @@ class FakeDB:
 
 
 class NoCacheSimulation(Simulation):
-    @staticmethod
-    def _next_rows(outcomes):
+    def _next_rows(self, outcomes):
         return None
 
 
@@ -333,6 +337,7 @@ class RoundCacheTests(unittest.TestCase):
             backend="serial",
             event_shards=1,
             seed=77,
+            max_sectors=4,
         )
         control = NoCacheSimulation(
             control_db,
@@ -342,6 +347,7 @@ class RoundCacheTests(unittest.TestCase):
             backend="serial",
             event_shards=1,
             seed=77,
+            max_sectors=4,
         )
 
         cached_report = cached.run()
@@ -374,11 +380,13 @@ class RoundCacheTests(unittest.TestCase):
                 (3, "human", 4.2, 4.2, False),
             ],
         )
-        rows = Simulation._next_rows([outcome])
+        simulation = Simulation(object())
+        simulation.map_bounds = map_bounds_for(3)
+        rows = simulation._next_rows([outcome])
         self.assertEqual(
             rows,
             [
-                (1, "human", int(cfg.MAP_MAX), int(cfg.MAP_MIN)),
+                (1, "human", int(simulation.map_bounds[2]), int(simulation.map_bounds[0])),
                 (2, "human", 11, -3),
             ],
         )

@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 
 from db.db_manager import DBManager
 from src.agent import Agent
-from src.sector_engine import SectorEngine, SectorOutcome
-from utils.sectoring import Sector
+from src.sector_engine import SectorEngine, SectorOutcome, derive_seed
+from utils.sectoring import Sector, build_sectors
 
 
 @dataclass
@@ -35,6 +35,7 @@ class SectorTask:
     max_ticks: int | None = None
     event_shards: int = 1
     db_config: dict | None = None
+    map_bounds: tuple[float, float, float, float] | None = None
     humans: list[Agent] | None = field(default=None, repr=False)
     zombies: list[Agent] | None = field(default=None, repr=False)
 
@@ -50,14 +51,18 @@ _CONNECTIONS: list[DBManager] = []
 _LOCK = threading.Lock()
 
 
-def worker_db(config: dict) -> DBManager:
+def worker_db(
+    config: dict, map_bounds: tuple[float, float, float, float] | None = None
+) -> DBManager:
     """Return this worker's connection, opening it on first use."""
     db = getattr(_STATE, "db", None)
     if db is None:
-        db = DBManager(config).connect()
+        db = DBManager(config, map_bounds=map_bounds).connect()
         _STATE.db = db
         with _LOCK:
             _CONNECTIONS.append(db)
+    elif map_bounds is not None:
+        db.map_bounds = map_bounds
     return db
 
 
@@ -99,6 +104,42 @@ def _final_states(humans, zombies) -> list[tuple]:
     ]
 
 
+def build_sector_tasks(
+    agents: list[Agent],
+    seed: int,
+    target_k: int,
+    *,
+    capture_frames: bool = False,
+    event_shards: int = 1,
+    map_bounds: tuple[float, float, float, float] | None = None,
+) -> list[SectorTask]:
+    """Turn agents into memory-mode sector tasks (tests and benchmarks)."""
+    positions = {
+        agent.agent_id: (float(agent.x_pos), float(agent.y_pos)) for agent in agents
+    }
+    types = {agent.agent_id: agent.agent_type for agent in agents}
+    sectors = build_sectors(
+        positions, target_k=target_k, types=types, map_bounds=map_bounds
+    )
+    by_id = {agent.agent_id: agent for agent in agents}
+    tasks = []
+    for sector in sectors:
+        members = [by_id[agent_id] for agent_id in sector.agent_ids]
+        tasks.append(
+            SectorTask(
+                sector=sector,
+                seed=derive_seed(seed, sector.index),
+                round_index=1,
+                sectors_in_round=len(sectors),
+                capture_frames=capture_frames,
+                event_shards=event_shards,
+                humans=[a for a in members if a.agent_type == "human"],
+                zombies=[a for a in members if a.agent_type == "zombie"],
+            )
+        )
+    return tasks
+
+
 def simulate_sector_task(task: SectorTask) -> SectorOutcome:
     engine = SectorEngine(
         max_ticks=task.max_ticks,
@@ -108,8 +149,12 @@ def simulate_sector_task(task: SectorTask) -> SectorOutcome:
     rng = random.Random(task.seed)
 
     if task.humans is not None or task.zombies is not None:
-        humans = {agent.agent_id: agent for agent in (task.humans or [])}
-        zombies = {agent.agent_id: agent for agent in (task.zombies or [])}
+        humans = {
+            agent.agent_id: agent for agent in (task.humans or []) if agent.is_alive
+        }
+        zombies = {
+            agent.agent_id: agent for agent in (task.zombies or []) if agent.is_alive
+        }
         outcome = engine.run(
             task.sector,
             humans,
@@ -124,7 +169,7 @@ def simulate_sector_task(task: SectorTask) -> SectorOutcome:
     if not task.db_config:
         raise ValueError("SectorTask needs either agent payloads or a db_config")
 
-    db = worker_db(task.db_config)
+    db = worker_db(task.db_config, task.map_bounds)
     human_list, zombie_list = db.load_agents(task.sector.agent_ids)
     humans = {agent.agent_id: agent for agent in human_list}
     zombies = {agent.agent_id: agent for agent in zombie_list}

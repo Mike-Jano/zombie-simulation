@@ -5,13 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from config.simulation_config import MAP_MAX, MAP_MIN
-
 Bounds = tuple[float, float, float, float]  # min_x, min_y, max_x, max_y
-
-
-def clamp_map(value: float) -> float:
-    return max(float(MAP_MIN), min(float(MAP_MAX), value))
 
 
 @dataclass
@@ -27,8 +21,6 @@ class Agent:
     speed: int
 
     def __post_init__(self) -> None:
-        self.x_pos = clamp_map(self.x_pos)
-        self.y_pos = clamp_map(self.y_pos)
         self.health = max(0, int(self.health))
         if self.health == 0:
             self.is_alive = False
@@ -70,9 +62,6 @@ class Agent:
             new_x = min_max(new_x, min_x, max_x)
             new_y = min_max(new_y, min_y, max_y)
 
-        new_x = clamp_map(new_x)
-        new_y = clamp_map(new_y)
-
         moved = math.hypot(new_x - self.x_pos, new_y - self.y_pos)
         return new_x, new_y, moved
 
@@ -99,12 +88,7 @@ class Agent:
             round(self.y_pos, 1),
             int(self.health),
             bool(self.is_alive),
-            int(self.special()),
         )
-
-    def special(self) -> int:
-        """Subtable stat (weapon tier / strength) - overridden."""
-        return 0
 
     def __str__(self) -> str:
         state = "alive" if self.is_alive else "dead"

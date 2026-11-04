@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import copy
+import io
 import random
 import sys
 import unittest
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,10 +21,14 @@ from config import simulation_config as cfg  # noqa: E402
 from runtime.capabilities import resolve_plan, resolve_workers  # noqa: E402
 from runtime.sector_pool import SectorPool  # noqa: E402
 from src.sector_engine import derive_seed  # noqa: E402
-from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
+from src.sector_task import build_sector_tasks, simulate_sector_task  # noqa: E402
 from src.simulation import Simulation  # noqa: E402
 from src.spawner import build_agents  # noqa: E402
-from utils.sectoring import build_sectors, resolve_sector_count  # noqa: E402
+from utils.sectoring import (  # noqa: E402
+    build_sectors,
+    max_sectors_for,
+    resolve_sector_count,
+)
 
 SEED = 4242
 
@@ -31,28 +38,7 @@ def make_agents(humans: int, zombies: int, seed: int = SEED) -> list:
 
 
 def make_tasks(agents, sector_count: int, seed: int = SEED):
-    positions = {
-        agent.agent_id: (float(agent.x_pos), float(agent.y_pos)) for agent in agents
-    }
-    types = {agent.agent_id: agent.agent_type for agent in agents}
-    sector_list = build_sectors(
-        positions, rng=random.Random(seed), target_k=sector_count, types=types
-    )
-    by_id = {agent.agent_id: agent for agent in agents}
-    tasks = []
-    for sector in sector_list:
-        members = [by_id[agent_id] for agent_id in sector.agent_ids]
-        tasks.append(
-            SectorTask(
-                sector=sector,
-                seed=derive_seed(seed, sector.index),
-                round_index=1,
-                sectors_in_round=len(sector_list),
-                humans=[a for a in members if a.agent_type == "human"],
-                zombies=[a for a in members if a.agent_type == "zombie"],
-            )
-        )
-    return tasks, sector_list
+    return build_sector_tasks(agents, seed, sector_count)
 
 
 def state_of(tasks) -> dict:
@@ -71,14 +57,29 @@ def state_of(tasks) -> dict:
 
 class SectorPolicyTests(unittest.TestCase):
     def test_sectors_scale_with_population(self):
-        # 500 agents per sector, capped at MAX_SECTORS.
+        # 500 agents per sector, with no fixed upper limit.
         self.assertEqual(resolve_sector_count(200), 1)
         self.assertEqual(resolve_sector_count(500), 1)
         self.assertEqual(resolve_sector_count(501), 2)
         self.assertEqual(resolve_sector_count(1500), 3)
         self.assertEqual(resolve_sector_count(3000), 6)
         self.assertEqual(resolve_sector_count(6000), 12)
-        self.assertEqual(resolve_sector_count(60_000), 12)
+        self.assertEqual(resolve_sector_count(60_000), 120)
+
+    def test_max_sectors_scales_with_the_starting_population(self):
+        self.assertEqual(max_sectors_for(0), 1)
+        self.assertEqual(max_sectors_for(200), 1)
+        self.assertEqual(max_sectors_for(501), 2)
+        self.assertEqual(max_sectors_for(6000), 12)
+        self.assertEqual(max_sectors_for(100_000), 200)
+
+    def test_sectors_fall_as_the_living_population_falls(self):
+        # The ceiling is fixed for the run; the actual count follows the living.
+        ceiling = max_sectors_for(3000)
+        self.assertEqual(ceiling, 6)
+        self.assertEqual(resolve_sector_count(3000, max_sectors=ceiling), 6)
+        self.assertEqual(resolve_sector_count(1500, max_sectors=ceiling), 3)
+        self.assertEqual(resolve_sector_count(100, max_sectors=ceiling), 1)
 
     def test_worker_count_does_not_change_the_plan(self):
         # There is no worker argument any more: cores cannot reshape the run.
@@ -88,15 +89,15 @@ class SectorPolicyTests(unittest.TestCase):
 
     def test_explicit_request_wins(self):
         self.assertEqual(resolve_sector_count(1200, requested=3), 3)
-        # ...but never beyond the schema/sector limits.
-        self.assertEqual(resolve_sector_count(1200, requested=99), 12)
+        # ...but never beyond the run's population-derived ceiling.
+        self.assertEqual(resolve_sector_count(1200, requested=99), 3)
 
     def test_build_sectors_honours_target(self):
         agents = make_agents(200, 200)
         positions = {a.agent_id: (a.x_pos, a.y_pos) for a in agents}
         types = {a.agent_id: a.agent_type for a in agents}
         sectors = build_sectors(
-            positions, rng=random.Random(1), target_k=6, types=types
+            positions, target_k=6, types=types
         )
         self.assertEqual(len(sectors), 6)
         self.assertEqual(
@@ -111,7 +112,7 @@ class SectorPolicyTests(unittest.TestCase):
         positions = {a.agent_id: (a.x_pos, a.y_pos) for a in agents}
         types = {a.agent_id: a.agent_type for a in agents}
         sectors = build_sectors(
-            positions, rng=random.Random(3), target_k=10, types=types
+            positions, target_k=10, types=types
         )
         for sector in sectors:
             kinds = {types[agent_id] for agent_id in sector.agent_ids}
@@ -130,7 +131,7 @@ class SectorPolicyTests(unittest.TestCase):
             types[agent_id] = "zombie"
 
         sectors = build_sectors(
-            positions, rng=random.Random(0), target_k=4, types=types
+            positions, target_k=4, types=types
         )
         self.assertEqual(len(sectors), 1)
         self.assertEqual(len(sectors[0].agent_ids), 200)
@@ -149,7 +150,7 @@ class SectorPolicyTests(unittest.TestCase):
         types[99] = "zombie"
 
         sectors = build_sectors(
-            positions, rng=random.Random(0), target_k=3, types=types
+            positions, target_k=3, types=types
         )
         self.assertEqual(
             sorted(agent_id for s in sectors for agent_id in s.agent_ids),
@@ -169,8 +170,8 @@ class SectorPolicyTests(unittest.TestCase):
 class DeterminismTests(unittest.TestCase):
     def test_same_seed_same_result(self):
         agents = make_agents(60, 60)
-        first, _ = make_tasks(agents, 4)
-        second, _ = make_tasks(make_agents(60, 60), 4)
+        first = make_tasks(agents, 4)
+        second = make_tasks(make_agents(60, 60), 4)
 
         a = [simulate_sector_task(task) for task in copy.deepcopy(first)]
         b = [simulate_sector_task(task) for task in copy.deepcopy(second)]
@@ -181,8 +182,8 @@ class DeterminismTests(unittest.TestCase):
     def test_different_seeds_diverge(self):
         # Agents start on top of each other so the seeded combat rolls - not
         # just the layout - decide the outcome.
-        base, _ = make_tasks(make_agents(30, 30, seed=1), 2, seed=1)
-        other, _ = make_tasks(make_agents(30, 30, seed=5), 2, seed=2)
+        base = make_tasks(make_agents(30, 30, seed=1), 2, seed=1)
+        other = make_tasks(make_agents(30, 30, seed=5), 2, seed=2)
         for tasks in (base, other):
             for task in tasks:
                 for agent in [*(task.humans or []), *(task.zombies or [])]:
@@ -200,7 +201,7 @@ class BackendEquivalenceTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pristine, _ = make_tasks(make_agents(70, 70), 5)
+        cls.pristine = make_tasks(make_agents(70, 70), 5)
 
     def _serial(self):
         tasks = copy.deepcopy(self.pristine)
@@ -257,7 +258,7 @@ class BackendEquivalenceTests(unittest.TestCase):
         )
 
     def test_frames_are_identical(self):
-        pristine, _ = make_tasks(make_agents(40, 40), 3)
+        pristine = make_tasks(make_agents(40, 40), 3)
         for task in pristine:
             task.capture_frames = True
 
@@ -335,6 +336,27 @@ class PoolSizingTests(unittest.TestCase):
         self.assertEqual(simulation._active_backend(), "serial")
 
 
+class PoolWidthTests(unittest.TestCase):
+    """The pool must shrink when the living population halves."""
+
+    def test_first_round_decides_the_pool(self):
+        simulation = Simulation(object())
+        with patch.object(simulation, "_decide_parallel") as decide:
+            simulation._sync_pool_width(4)
+            decide.assert_called_once_with(4)
+
+    def test_pool_shrinks_when_the_sector_count_halves(self):
+        simulation = Simulation(object())
+        simulation._parallel = True
+        simulation.workers = 6
+        with patch.object(simulation, "_decide_parallel") as decide:
+            simulation._sync_pool_width(3)
+            decide.assert_called_once_with(3)
+            decide.reset_mock()
+            simulation._sync_pool_width(4)
+            decide.assert_not_called()
+
+
 class SeedTests(unittest.TestCase):
     def test_derive_seed_is_stable_and_distinct(self):
         self.assertEqual(derive_seed(7, 3), derive_seed(7, 3))
@@ -347,6 +369,63 @@ class SeedTests(unittest.TestCase):
 class WorkerCapTests(unittest.TestCase):
     def test_explicit_worker_count_is_capped(self):
         self.assertLessEqual(resolve_workers(100_000), cfg.MAX_WORKERS)
+
+
+class BenchToolTests(unittest.TestCase):
+    def test_population_above_the_limit_is_rejected(self):
+        from tools import bench_parallel
+
+        with redirect_stdout(io.StringIO()):
+            code = bench_parallel.main(["--population", str(cfg.MAX_AGENTS + 1)])
+        self.assertEqual(code, 1)
+
+    def test_zero_population_is_rejected(self):
+        from tools import bench_parallel
+
+        with redirect_stdout(io.StringIO()):
+            code = bench_parallel.main(["--population", "0"])
+        self.assertEqual(code, 1)
+
+    def test_split_outside_a_fraction_is_rejected(self):
+        from tools import bench_parallel
+
+        with redirect_stdout(io.StringIO()):
+            code = bench_parallel.main(["--population", "10", "--split", "2"])
+        self.assertEqual(code, 1)
+
+    def test_rows_use_the_same_budget_and_shards_as_a_real_run(self):
+        from tools import bench_parallel
+
+        # 8 workers, 3 sectors: 3 outer + 2 shards each (thread backend).
+        self.assertEqual(bench_parallel._row_plan(8, 3, "thread", 0), (8, 3, 2))
+        # 100 workers is capped at MAX_WORKERS, and process runs never shard.
+        self.assertEqual(
+            bench_parallel._row_plan(100, 200, "process", 0), (cfg.MAX_WORKERS, 12, 1)
+        )
+        self.assertEqual(bench_parallel._row_plan(6, 3, "process", 4), (6, 3, 1))
+
+
+class ReportWidthTests(unittest.TestCase):
+    def test_report_keeps_the_widest_width_when_the_pool_shrinks(self):
+        simulation = Simulation(SimpleNamespace(config={}))
+        simulation.report.workers = 6
+        simulation.report.event_shards = 3
+        sector = SimpleNamespace(index=1, agent_ids=[], bounds=(0.0, 0.0, 1.0, 1.0))
+        outcome = SimpleNamespace(report=SimpleNamespace(index=1))
+
+        simulation.workers = 8
+        simulation.event_shards = 4
+        with patch.object(simulation, "_run_sector_serial", return_value=outcome):
+            simulation._run_round([sector], 1, 123)
+        self.assertEqual(simulation.report.workers, 8)
+        self.assertEqual(simulation.report.event_shards, 4)
+
+        simulation.workers = 2
+        simulation.event_shards = 1
+        with patch.object(simulation, "_run_sector_serial", return_value=outcome):
+            simulation._run_round([sector], 2, 456)
+        self.assertEqual(simulation.report.workers, 8)
+        self.assertEqual(simulation.report.event_shards, 4)
 
 
 class _FailingPool:
@@ -365,9 +444,18 @@ class PoolFailureTests(unittest.TestCase):
         simulation = Simulation(SimpleNamespace(config={}))
         simulation._pool = _FailingPool()
         simulation._parallel = True
+        simulation.workers = 6
+        simulation.event_shards = 2
+        simulation._backend_used = "process"
         sector = SimpleNamespace(index=1, agent_ids=[], bounds=(0.0, 0.0, 1.0, 1.0))
         with self.assertRaises(RuntimeError):
             simulation._run_round([sector], 1, 123)
+
+        # The report keeps the width that was actually used, not the serial
+        # fallback installed by _disable_pool.
+        self.assertEqual(simulation.report.workers, 6)
+        self.assertEqual(simulation.report.backend, "process")
+        self.assertEqual(simulation.report.event_shards, 2)
 
 
 if __name__ == "__main__":

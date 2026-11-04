@@ -27,6 +27,7 @@ from db.db_manager import DBManager
 from runtime.capabilities import VALID_BACKENDS, resolve_plan
 from src.simulation import Simulation
 from src.spawner import generate_spawns
+from utils.sectoring import map_bounds_for, max_sectors_for
 from vis.html_vis import HtmlVisualizer
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -78,8 +79,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "sectors per round; 0 = auto (one per AGENTS_PER_SECTOR agents). "
-            "Pin this to force a particular split"
+            "sectors per round; 0 = auto (one per AGENTS_PER_SECTOR agents, "
+            "capped by the starting population). Pin this to force a split"
         ),
     )
     parser.add_argument(
@@ -182,18 +183,12 @@ def ensure_database(config: dict) -> bool:
 def try_bootstrap(config: dict) -> bool:
     try:
         missing = schema.bootstrap(config)
-        if missing:
-            print()
-            print(missing)
-            return False
-        stale_bounds = schema.map_bounds_mismatch(config)
     except psycopg.Error as exc:
         _print_db_error(exc)
         return False
-    if stale_bounds:
+    if missing:
         print()
-        print(stale_bounds)
-        print("Choose 2) Clear & recreate database once, then try again.")
+        print(missing)
         return False
     return True
 
@@ -354,15 +349,21 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
     backend = args.backend if args is not None else None
     sectors = args.sectors if args is not None else None
     event_shards = args.event_shards if args is not None else None
+    map_bounds = map_bounds_for(total)
+    run_max_sectors = max_sectors_for(total)
     plan = resolve_plan(workers, backend)
     print(f"  Parallel: {plan.describe()}")
+    print(f"  Map: {int(map_bounds[0])}..{int(map_bounds[2])} on each axis")
     if sectors:
-        print(f"  Sectors per round: {sectors} (pinned)")
+        print(
+            f"  Sectors per round: {min(sectors, run_max_sectors)} "
+            f"(pinned; max {run_max_sectors})"
+        )
     else:
         print(
             "  Sectors per round: auto "
             f"(one per {cfg.AGENTS_PER_SECTOR} agents, "
-            f"max {cfg.MAX_SECTORS})"
+            f"max {run_max_sectors} from {total} starting agents)"
         )
     if plan.backend == "thread":
         print(
@@ -376,7 +377,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
         html_visualizer = HtmlVisualizer()
         visualizers.append(html_visualizer)
 
-    db = DBManager(config)
+    db = DBManager(config, map_bounds=map_bounds)
     simulation: Simulation | None = None
     try:
         db.connect()
@@ -392,7 +393,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
             print(
                 f"Removed {removed} leftover agent(s) from the previous run.")
 
-        specs = generate_spawns(humans, zombies, rng)
+        specs = generate_spawns(humans, zombies, rng, map_bounds=map_bounds)
 
         def progress(sector_report, total: int, round_index: int) -> None:
             print(
@@ -413,6 +414,8 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
             sectors=sectors,
             event_shards=event_shards,
             seed=seed,
+            map_bounds=map_bounds,
+            max_sectors=run_max_sectors,
         )
         # Let worker start-up overlap with the insert instead of delaying the
         # first round (a no-op when the run stays single-threaded).
@@ -424,11 +427,14 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
         print(report.render())
 
         if html_visualizer is not None:
-            print(f"HTML visualisation: {html_visualizer.path}")
-            try:
-                webbrowser.open(html_visualizer.path.resolve().as_uri())
-            except Exception:
-                print("Open the file manually in a browser to watch the run.")
+            if html_visualizer.frames:
+                print(f"HTML visualisation: {html_visualizer.path}")
+                try:
+                    webbrowser.open(html_visualizer.path.resolve().as_uri())
+                except Exception:
+                    print("Open the file manually in a browser to watch the run.")
+            else:
+                print("No HTML player: the run produced no frames.")
         return True
     finally:
         if simulation is not None:
@@ -457,6 +463,10 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print(f"Run aborted: {exc}")
             handle_exit(config)
+            return 1
+        except psycopg.Error as exc:
+            print()
+            _print_db_error(exc)
             return 1
         return 0 if ok else 1
 
@@ -493,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print()
             print(f"Run aborted: {exc}")
+            print("The next run clears the leftover agents automatically.")
+        except psycopg.Error as exc:
+            print()
+            _print_db_error(exc)
             print("The next run clears the leftover agents automatically.")
 
 

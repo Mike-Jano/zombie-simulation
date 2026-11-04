@@ -121,7 +121,9 @@ The subtables reference `agents` through the composite key
 `(agent_id, agent_type)` with `ON DELETE CASCADE`.
 
 Dead agents are **never deleted** – `is_alive` is just set to `false`, so the
-database keeps the full history of the run.
+database keeps the full history of the run. They are not loaded back into
+memory and do not appear in the HTML frames; only living agents are read,
+simulated and drawn.
 
 Only one simulation can use a database at a time. The app takes a PostgreSQL
 advisory lock for the run and refuses a second run (or a reset) instead of
@@ -132,7 +134,7 @@ truncating the first run's agents.
 Agents are not all loaded at once. `src/simulation.py` works in **rounds**:
 
 1. Read every living agent's position (`SELECT ... WHERE is_alive`).
-2. Cluster those positions into sectors (k-means, `utils/sectoring.py`). The
+2. Cut those positions into sectors with a grid (`utils/sectoring.py`). The
    sector count scales with the population — one sector per
    `AGENTS_PER_SECTOR` agents, so 200 agents are a single arena (see
    [Parallelism](#parallelism)).
@@ -147,8 +149,9 @@ Sectors are therefore not fixed for the whole run — they are rebuilt every
 drifting away from where the agents actually are.
 
 A sector's walkable area is its cluster's bounding box plus padding, clamped to
-the map. Agents cannot leave the map (−1000…1000 on both axes) or their sector
-for the duration of a visit.
+the map. Agents cannot leave the map or their sector for the duration of a
+visit. The map is sized once from the starting population (see
+[Map size](#map-size)).
 
 ### Tick order
 
@@ -211,7 +214,7 @@ enormous HTML files.
 
 ## Parallelism
 
-Sectors are independent: k-means gives every agent exactly one sector, and a
+Sectors are independent: the grid gives every agent exactly one sector, and a
 visit loads, simulates and writes its agents back before the next one starts.
 Nothing in a round touches another sector's agents, so a round's sectors are
 already safe to run at the same time — that is the entire speed-up.
@@ -257,9 +260,10 @@ event_shards  = workers // outer_workers
 So 12 workers and 3 sectors means 3 outer threads × 4 shards per sector, while
 a single sector gets all 12 shards and no outer pool. Process and serial
 backends always use one shard, because a process already owns a whole sector.
-`--event-shards N` is capped by the worker budget, so a typo cannot create
-thousands of threads. If a stalled round collapses the run to one sector, the
-outer pool is closed and that sector gets the whole thread budget.
+`--event-shards N` is capped by each sector's share of the worker budget, so a
+typo cannot create thousands of threads. If a stalled round collapses the run to
+one sector, the outer pool is closed and that sector gets the whole thread
+budget.
 
 Why shards only help on a free-threaded build: on a GIL build the shards run
 correctly but one at a time, so the default (`EVENT_PARALLEL = "auto"`) leaves
@@ -283,21 +287,30 @@ brute-force reference on random, collinear and duplicate layouts.
 ### Sectors scale with the population
 
 ```
-k = clamp(ceil(agents / AGENTS_PER_SECTOR), 1, MAX_SECTORS)
+max_sectors = max(1, ceil(starting_agents / AGENTS_PER_SECTOR))
+k           = clamp(ceil(living_agents / AGENTS_PER_SECTOR), 1, max_sectors)
 ```
 
-| Population | Sectors | Parallel workers |
-| --- | --- | --- |
-| 200 | **1** | 1 (serial) |
-| 500 | 1 | 1 |
-| 1000 | 2 | 2 |
-| 1500 | 3 | 3 |
-| 3000 | 6 | 6 |
-| 6000+ | 12 (cap) | up to 12 |
+There is no fixed maximum. The ceiling is derived from the starting population;
+the actual count falls as agents die.
 
-The worker count never influences this: cores execute the sectors the
-population produced, they do not create more. Two machines with different CPU
-counts therefore simulate the same run from the same seed.
+| Starting population | Maximum sectors |
+| --- | --- |
+| 200 | 1 |
+| 500 | 1 |
+| 1000 | 2 |
+| 1500 | 3 |
+| 3000 | 6 |
+| 6000 | 12 |
+| 60,000 | 120 |
+
+For example, a run that starts with 3000 agents may use up to 6 sectors; once
+only 1500 are alive it uses 3, and once only 100 are alive it uses 1.
+
+`MAX_WORKERS` still caps parallel width, so sectors beyond the worker count
+simply queue. The worker count never influences the plan: cores execute the
+sectors the population produced, they do not create more. Two machines with
+different CPU counts therefore simulate the same run from the same seed.
 
 Coarse sectors are a correctness feature, not just a speed knob. A finely split
 map leaves clusters containing only humans or only zombies, and such a sector
@@ -338,9 +351,11 @@ python tools/bench_parallel.py --population 1200 --backend thread --event-shards
 
 On the reference machine (12 logical CPUs, Windows): 1200 agents make 3 sectors
 and scale 1x → 2.6x on 3 workers. 4000 agents make 8 sectors and reach 5.0x on
-8 workers. More workers than sectors cannot help, so the benchmark caps each row
-at the sector count and says so. These are in-memory runs that pickle agents
-every round; a real run sends only the sector description (workers load from
+8 workers. The outer pool is capped at the sector count; on the thread backend
+the rest of the `--workers` budget becomes per-sector shards, and the benchmark
+resolves the same budget and shard plan as a real run. A row is labelled when
+the outer pool is capped. These are in-memory runs that pickle agents every
+round; a real run sends only the sector description (workers load from
 PostgreSQL), so it has less IPC to do.
 
 End to end, with PostgreSQL and spawn/insert included, 3000 agents (seed 7,
@@ -360,16 +375,18 @@ run that cut the pooled time from 2.2 s to 1.2 s when it was introduced.
 ### What it costs
 
 - Worker processes use ~30–50 MB each plus a one-off start-up of ~0.5 s on
-  Windows; a run pays that once, overlaps it with the spawn insert and then
-  reuses the pool for every round.
+  Windows; a run pays that at start-up, overlaps it with the spawn insert and
+  reuses the pool until the living population halves. Shrinking pays the
+  start-up again but frees the idle workers and their connections.
 - Parallel width is `min(MAX_WORKERS, sectors)`, and sectors come from the
   population. 3000 agents therefore use at most 6 workers; raising
-  `MAX_SECTORS` (or lowering `AGENTS_PER_SECTOR`) buys more cores at the cost of
+  `MAX_WORKERS` (or lowering `AGENTS_PER_SECTOR`) buys more cores at the cost of
   smaller arenas and fewer interactions between the two sides.
 - Nearest-enemy search is grid-accelerated (expected O(1) per query), so a
   sector's per-tick cost grows roughly linearly with its agents instead of
-  quadratically. Sector size is still bounded by `AGENTS_PER_SECTOR` because
-  bigger arenas mean fewer cross-sector rounds, not because of the scan.
+  quadratically. `AGENTS_PER_SECTOR` is a target, but mono-type merging can make
+  one sector larger (or the whole map one arena); bigger arenas mean fewer
+  cross-sector rounds, not a scan bound.
 - After each round the orchestrator clusters from the states the sector visits
   already reported (`SectorOutcome.final_states`) instead of issuing another
   `SELECT` over every living agent. The cache applies the same map clamping and
@@ -392,8 +409,14 @@ run that cut the pooled time from 2.2 s to 1.2 s when it was introduced.
 .\venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-The data-layer tests are skipped by default. Run them against a scratch
-PostgreSQL with:
+The data-layer tests are skipped by default. Run the full pre-ship check
+(unit suite + live PostgreSQL) with:
+
+```
+.\venv\Scripts\python.exe tools\check.py
+```
+
+Or run only the data-layer tests against a scratch PostgreSQL with:
 
 ```
 .\tools\test_db.ps1
@@ -426,12 +449,13 @@ src/
   simulation.py             round loop, scheduling, reports
 utils/
   combat.py                 hit chance and damage formulas
-  sectoring.py              k-means clustering and the sector-count policy
+  sectoring.py              grid sectoring and the sector-count policy
   spatial.py                uniform-grid nearest-enemy index
 vis/
   html_vis.py               self-contained HTML player
 tools/
   bench_parallel.py         worker/backend speed-up benchmark
+  check.py                  full check: unit suite + live PostgreSQL
   test_db.ps1               opt-in PostgreSQL test runner
 tests/
   test_parallel.py          sector policy, determinism, backend equivalence
@@ -453,11 +477,13 @@ output/                     generated HTML runs (created on demand)
 Everything is in `config/simulation_config.py` – no other file needs editing:
 
 ```python
-MAP_MIN, MAP_MAX = -1000, 1000
+# Map: minimum half-extent and target area per starting agent.
+MAP_MIN_HALF_EXTENT = 50
+MAP_AREA_PER_AGENT = 1000
 
-# Sectoring: one sector per AGENTS_PER_SECTOR living agents.
+# Sectoring: one sector per AGENTS_PER_SECTOR living agents, with the ceiling
+# derived from the starting population.
 AGENTS_PER_SECTOR = 500
-MAX_SECTORS = 12
 SECTOR_PADDING = 25.0
 SECTOR_COUNT = 0              # 0 = population rule; N pins the split
 COLLAPSE_ON_STAGNATION = True # stalled round -> one global sector, keep going
@@ -504,18 +530,24 @@ Note: only `HUMAN_WEAPON_TIER_RANGE` and `ZOMBIE_STRENGTH_RANGE` are clamped by
 `CHECK` constraints in the schema (tiers and strengths must stay within 1–5).
 The health and speed ranges only shape new spawns.
 
-### Changing the map size
+### Map size
 
-`MAP_MIN` and `MAP_MAX` are baked into the `agents` table as `CHECK`
-constraints, so a database created by an older build keeps its old limits. The
-app detects that at start-up and asks you to run **2) Clear & recreate
-database** once; after that every run uses the new bounds. The HTML player
-takes its extent and grid step from the same config, so it cannot drift out of
-sync.
+The map is chosen once per run from the starting population:
 
-A wider map spreads the same population thinner (four times the area at
-−1000…1000), so agents take longer to meet and runs need more rounds. The rules
-themselves are unchanged.
+```
+half = max(MAP_MIN_HALF_EXTENT,
+           ceil(sqrt(total_agents * MAP_AREA_PER_AGENT) / 2))
+```
+
+Area grows with the population, so average spacing (and how long a chase takes)
+stays roughly constant. The smallest map is `-50…50` on each axis; there is no
+upper limit. The HTML player records the run's actual extent and grid step, so
+it cannot drift out of sync.
+
+Older databases may still carry the fixed `-1000…1000` `CHECK` constraints.
+Bootstrap drops those constraints (leaving every agent row untouched) because a
+static boundary cannot describe a per-run map. Bounds are enforced while
+spawning, saving and moving agents.
 
 ### Command line
 

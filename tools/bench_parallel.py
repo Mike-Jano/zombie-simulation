@@ -5,9 +5,10 @@ visualisers - so the numbers reflect CPU scaling only.  Use it to pick a
 ``--workers`` value for a specific chip: hybrid big.LITTLE parts, SMT-heavy
 desktops and small ARM boards all peak at different counts.
 
-The sector count comes from the population, so it also caps the useful worker
-count: 1200 agents make 3 sectors and cannot use more than 3 workers.  Rows
-that would exceed it are capped and labelled.
+The sector count comes from the population, so it caps the outer pool:
+1200 agents make 3 sectors and use at most 3 outer workers. On the thread
+backend the rest of the ``--workers`` budget becomes per-sector shards, and the
+benchmark resolves both from the same helpers as a real run.
 
     python tools/bench_parallel.py
     python tools/bench_parallel.py --population 4000 --workers 1,2,4,8,12
@@ -27,43 +28,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import simulation_config as cfg  # noqa: E402
-from runtime.capabilities import resolve_plan  # noqa: E402
+from runtime.capabilities import (  # noqa: E402
+    resolve_event_shards,
+    resolve_plan,
+    resolve_workers,
+)
 from runtime.sector_pool import SectorPool  # noqa: E402
-from src.sector_engine import derive_seed  # noqa: E402
-from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
+from src.sector_task import build_sector_tasks, simulate_sector_task  # noqa: E402
 from src.spawner import build_agents  # noqa: E402
 from utils.sectoring import build_sectors, resolve_sector_count  # noqa: E402
-
-
-def build_tasks(
-    agents, seed: int, sectors: int | None = None, event_shards: int = 1
-):
-    positions = {
-        agent.agent_id: (float(agent.x_pos), float(agent.y_pos)) for agent in agents
-    }
-    types = {agent.agent_id: agent.agent_type for agent in agents}
-    count = resolve_sector_count(len(agents), requested=sectors)
-    sector_list = build_sectors(
-        positions, rng=random.Random(seed), target_k=count, types=types
-    )
-
-    by_id = {agent.agent_id: agent for agent in agents}
-    tasks = []
-    for sector in sector_list:
-        members = [by_id[agent_id] for agent_id in sector.agent_ids]
-        tasks.append(
-            SectorTask(
-                sector=sector,
-                seed=derive_seed(seed, sector.index),
-                round_index=1,
-                sectors_in_round=len(sector_list),
-                capture_frames=False,
-                event_shards=event_shards,
-                humans=[a for a in members if a.agent_type == "human"],
-                zombies=[a for a in members if a.agent_type == "zombie"],
-            )
-        )
-    return tasks, len(sector_list)
 
 
 def _with_shards(tasks, event_shards: int):
@@ -73,12 +46,12 @@ def _with_shards(tasks, event_shards: int):
     return cloned
 
 
-def measure_serial(pristine, rounds: int, event_shards: int = 1) -> tuple[float, int]:
+def measure_serial(pristine, rounds: int) -> tuple[float, int]:
     """Every timed round starts from the same state, for both backends."""
     started = time.perf_counter()
     ticks = 0
     for _ in range(max(1, rounds)):
-        tasks = _with_shards(pristine, event_shards)
+        tasks = _with_shards(pristine, 1)
         outcomes = [simulate_sector_task(task) for task in tasks]
         ticks += sum(o.report.iterations for o in outcomes)
     return time.perf_counter() - started, ticks
@@ -118,6 +91,19 @@ def parse_worker_list(raw: str) -> list[int]:
     return values or [1]
 
 
+def _row_plan(
+    requested_workers: int, sector_count: int, backend: str, event_shards: int
+) -> tuple[int, int, int]:
+    """Resolve a row the same way a real run does.
+
+    Returns ``(worker budget, outer pool size, per-sector shards)``.
+    """
+    budget = resolve_workers(requested_workers)
+    outer = min(budget, max(1, sector_count))
+    shards = resolve_event_shards(sector_count, budget, backend, event_shards)
+    return budget, outer, shards
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -129,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--workers",
         default="1,2,4,8",
-        help="comma-separated worker counts to test (default 1,2,4,8)",
+        help="comma-separated worker budgets to test (default 1,2,4,8)",
     )
     parser.add_argument(
         "--sectors", type=int, default=None, help="pin the sector count (0 = auto)"
@@ -153,10 +139,25 @@ def main(argv: list[str] | None = None) -> int:
         "--event-shards",
         type=int,
         default=0,
-        help="per-sector tick shards for the pooled rows (0 = one)",
+        help="per-sector tick shards for the pooled rows (0 = auto)",
     )
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args(argv)
+
+    if args.population <= 0:
+        print("Population must be a positive number of agents.")
+        return 1
+
+    if not 0.0 <= args.split <= 1.0:
+        print(f"Split must be a fraction between 0 and 1; got {args.split}.")
+        return 1
+
+    if args.population > cfg.MAX_AGENTS:
+        print(
+            f"Population {args.population} exceeds MAX_AGENTS="
+            f"{cfg.MAX_AGENTS}; refusing to allocate it."
+        )
+        return 1
 
     humans = max(0, int(round(args.population * args.split)))
     zombies = max(0, args.population - humans)
@@ -174,24 +175,18 @@ def main(argv: list[str] | None = None) -> int:
     types = {a.agent_id: a.agent_type for a in agents}
     count = resolve_sector_count(len(agents), requested=args.sectors)
     started = time.perf_counter()
-    build_sectors(
-        positions, rng=random.Random(args.seed), target_k=count, types=types
-    )
+    build_sectors(positions, target_k=count, types=types)
     cluster_ms = (time.perf_counter() - started) * 1000
 
-    pristine, sector_count = build_tasks(
-        agents,
-        args.seed,
-        sectors=args.sectors,
-        event_shards=max(1, args.event_shards),
-    )
+    pristine = build_sector_tasks(agents, args.seed, count)
+    sector_count = len(pristine)
     sizes = [len(t.humans or []) + len(t.zombies or []) for t in pristine]
     print(
         f"Sectors   : {sector_count} per round, "
         f"{min(sizes)}..{max(sizes)} agents each"
     )
     print(f"Clustering: {cluster_ms:.1f} ms per round (serial)")
-    print(f"Shards    : {max(1, args.event_shards)} per sector in pooled rows")
+    print(f"Shards    : {args.event_shards or 'auto'} per sector (budget-capped)")
     print()
 
     header = (
@@ -220,27 +215,27 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     results = []
-    measured_widths: set[int] = set()
+    measured_plans: set[tuple[int, int]] = set()
     for requested_workers in parse_worker_list(args.workers):
         if requested_workers <= 1:
-            continue
-        # A real run never uses more workers than sectors, so measuring more is
-        # meaningless: the extra processes would sit idle.
-        workers = min(requested_workers, sector_count)
-        if workers in measured_widths:
-            continue
-        measured_widths.add(workers)
-        if workers <= 1:
-            print(
-                f"{'serial':<9} {1:>7} {rounds:>6} {'-':>7} "
-                f"{'-':>8} {'-':>9} {'-':>8} {'-':>10} {'-':>8}"
-                "  (only one sector)"
-            )
             continue
         if args.backend and args.backend != "auto":
             backend = args.backend
         else:
             backend = "thread" if not plan.gil_enabled else "process"
+        budget, workers, event_shards = _row_plan(
+            requested_workers, sector_count, backend, args.event_shards
+        )
+        if (workers, event_shards) in measured_plans:
+            continue
+        measured_plans.add((workers, event_shards))
+        if workers <= 1:
+            print(
+                f"{'serial':<9} {budget:>7} {rounds:>6} {'-':>7} "
+                f"{'-':>8} {'-':>9} {'-':>8} {'-':>10} {'-':>8}"
+                "  (only one sector)"
+            )
+            continue
         best = None
         for _ in range(max(1, args.repeats)):
             measured = measure_pool(
@@ -248,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 backend,
                 workers,
                 rounds,
-                event_shards=max(1, args.event_shards),
+                event_shards=event_shards,
             )
             if measured is None:
                 best = None
@@ -256,16 +251,21 @@ def main(argv: list[str] | None = None) -> int:
             if best is None or measured[0] < best[0]:
                 best = measured
         if best is None:
-            print(f"{backend:<9} {workers:>7} {'pool could not start':>46}")
+            print(f"{backend:<9} {budget:>7} {'pool could not start':>46}")
             continue
 
         elapsed, ticks, startup = best
         speedup = baseline[0] / elapsed if elapsed > 0 else 0.0
-        efficiency = speedup / workers
-        results.append((backend, workers, ticks, elapsed, speedup, efficiency))
-        note = "" if requested_workers == workers else "  (capped by sectors)"
+        efficiency = speedup / budget
+        results.append((backend, budget, ticks, elapsed, speedup, efficiency))
+        if budget != requested_workers:
+            note = f"  (capped at MAX_WORKERS={cfg.MAX_WORKERS})"
+        elif workers < budget:
+            note = "  (outer capped by sectors)"
+        else:
+            note = ""
         print(
-            f"{backend:<9} {workers:>7} {rounds:>6} {ticks:>7} "
+            f"{backend:<9} {budget:>7} {rounds:>6} {ticks:>7} "
             f"{elapsed:>8.2f} {ticks / elapsed:>9.1f} {speedup:>7.2f}x "
             f"{efficiency:>9.0%} {startup:>7.2f}s{note}"
         )

@@ -6,30 +6,38 @@ Everything here can be edited without touching the simulation code.
 # --------------------------------------------------------------------------- #
 # Map
 # --------------------------------------------------------------------------- #
-MAP_MIN = -1000
-MAP_MAX = 1000
-MAP_SPAN = MAP_MAX - MAP_MIN   # derived; never set this by hand
+# The map is sized from the starting population so every agent gets roughly the
+# same amount of space:
+#
+#     half = max(MAP_MIN_HALF_EXTENT,
+#                ceil(sqrt(total_agents * MAP_AREA_PER_AGENT) / 2))
+#
+# The minimum keeps tiny runs in a usable arena; there is no upper limit.
+MAP_MIN_HALF_EXTENT = 50
+MAP_AREA_PER_AGENT = 1000
 
 # --------------------------------------------------------------------------- #
 # Sectoring
 # --------------------------------------------------------------------------- #
 # The map is split into one sector per this many living agents:
 #
-#     sectors = clamp(ceil(agents / AGENTS_PER_SECTOR), 1, MAX_SECTORS)
+#     max_sectors = max(1, ceil(initial_agents / AGENTS_PER_SECTOR))
+#     sectors     = clamp(ceil(living_agents / AGENTS_PER_SECTOR),
+#                         1, max_sectors)
 #
 # 200 agents -> 1 sector, 1500 -> 3, 3000 -> 6. Fewer, larger sectors are what
 # let humans and zombies actually meet: a finely split map can leave whole
 # sectors with only one type, which is how a run used to end with both sides
-# still alive. Raise MAX_SECTORS to use more cores at the cost of smaller
-# arenas; set SECTOR_COUNT to pin the count for an exact reproduction.
+# still alive. There is no fixed maximum: the cap scales with the starting
+# population, and the actual count falls as agents die.
 AGENTS_PER_SECTOR = 500
-MAX_SECTORS = 12
 # A sector's walkable bounding box is the cluster's bounding box expanded by
 # this many map units (clamped to the map). Agents never leave their sector.
 SECTOR_PADDING = 25.0
 
 # 0 = sectors follow the population rule above. Any other value pins the count
-# (bounded by MAX_SECTORS), which is how a run is reproduced exactly.
+# (bounded by the run's population-derived maximum), which is how a run is
+# reproduced exactly.
 SECTOR_COUNT = 0
 
 # If a round ends with both sides alive and nothing happened at all (no attack,

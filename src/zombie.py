@@ -28,6 +28,3 @@ class Zombie(Agent):
 
     def roll_damage(self, rng: random.Random) -> int:
         return combat.zombie_damage(self.strength, rng)
-
-    def special(self) -> int:
-        return self.strength

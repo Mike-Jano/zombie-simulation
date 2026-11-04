@@ -156,6 +156,29 @@ class DatabaseIntegrationTests(unittest.TestCase):
         missing = schema.bootstrap(TEST_CONFIG)
         self.assertIn("agents.is_alive", missing)
 
+    def test_bootstrap_drops_stale_map_bounds_without_touching_rows(self):
+        self._insert(1, 1)
+        with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE agents ADD CONSTRAINT agents_x_pos_bounds "
+                    "CHECK (x_pos BETWEEN -1000 AND 1000)"
+                )
+
+        self.assertIsNone(schema.bootstrap(TEST_CONFIG))
+
+        with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conrelid = 'agents'::regclass AND contype = 'c' "
+                    "AND pg_get_constraintdef(oid) ~ 'x_pos'"
+                )
+                self.assertEqual(cur.fetchone()[0], 0)
+                cur.execute("SELECT count(*) FROM agents")
+                self.assertEqual(cur.fetchone()[0], 2)
+
     def test_bootstrap_recreates_a_missing_subtable(self):
         with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
             conn.autocommit = True

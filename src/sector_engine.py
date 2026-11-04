@@ -527,14 +527,17 @@ class SectorEngine:
         ):
             return
 
+        # Dead agents stay in PostgreSQL, but never enter a frame: the player
+        # only needs the living population.
         snapshot = [
-            agent.snapshot() for agent in (*humans.values(), *zombies.values())
+            agent.snapshot()
+            for agent in (*humans.values(), *zombies.values())
+            if agent.is_alive
         ]
         meta = {
             "sector": sector.index,
             "sectors": sectors_in_round,
             "round": round_index,
-            "sector_size": sector.size,
             "iteration": iteration,
             "humans_alive": sum(1 for agent in humans.values() if agent.is_alive),
             "zombies_alive": sum(1 for agent in zombies.values() if agent.is_alive),

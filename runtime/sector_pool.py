@@ -7,9 +7,9 @@ Three backends, one interface:
              work is dominated by database round trips.
 ``serial``   everything inline; always available, always correct.
 
-The pool is created once per run and reused across rounds.  ``spawn`` is used
-explicitly rather than ``fork``: forking a process that already holds psycopg
-connections is unsafe, and ``fork`` does not exist on Windows.
+The pool is reused across rounds and shrunk when the work halves.  ``spawn`` is
+used explicitly rather than ``fork``: forking a process that already holds
+psycopg connections is unsafe, and ``fork`` does not exist on Windows.
 """
 
 from __future__ import annotations

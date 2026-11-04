@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
 from config import simulation_config as cfg
+from utils.sectoring import map_bounds_for
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -68,7 +70,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .dot.human { background: var(--human); box-shadow: 0 0 0 3px var(--human-soft); }
   .dot.zombie { background: var(--zombie); box-shadow: 0 0 0 3px var(--zombie-soft); }
-  .dot.dead { background: transparent; border: 1.5px solid rgba(170,178,200,.45); }
   footer { padding: 0 24px 24px; color: var(--muted); font-size: 12px; }
 </style>
 </head>
@@ -102,7 +103,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="legend">
         <span><span class="dot human"></span>Human</span>
         <span><span class="dot zombie"></span>Zombie</span>
-        <span><span class="dot dead"></span>Dead</span>
         <span><span class="dot" style="background:var(--accent);border-radius:2px"></span>Sector</span>
       </div>
       <p class="muted" style="font-size:12px; margin:12px 0 0; line-height:1.5;">
@@ -136,8 +136,8 @@ const RUNINFO = __RUNINFO__;
 // Map extent and grid come from the Python config via RUNINFO, so changing
 // MAP_MIN/MAP_MAX never leaves the player out of sync (fallbacks keep old files
 // readable).
-const MAP_MIN = RUNINFO.map_min ?? -500;
-const MAP_MAX = RUNINFO.map_max ?? 500;
+const MAP_MIN = RUNINFO.map_min ?? -50;
+const MAP_MAX = RUNINFO.map_max ?? 50;
 const GRID_STEP = RUNINFO.grid_step ?? 100;
 // Lines every GRID_STEP; numbers every other line so they stay readable.
 const LABEL_STEP = GRID_STEP * 2;
@@ -243,19 +243,9 @@ function roundRect(x, y, w, h, radius) {
 
 function drawAgents(agents) {
   for (const agent of agents) {
-    const [, type, x, y, hp, alive] = agent;
+    const [, type, x, y, hp] = agent;
     const px = sx(x), py = sy(y);
     const style = type === "human" ? AGENT_STYLE.human : AGENT_STYLE.zombie;
-
-    if (!alive) {
-      // Hollow ring: clearly present, clearly out of the fight.
-      ctx.beginPath();
-      ctx.arc(px, py, 3.2, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(170,178,200,0.35)";
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-      continue;
-    }
 
     // Soft halo instead of an expensive per-agent shadow/gradient.
     ctx.beginPath();
@@ -410,12 +400,18 @@ def _grid_step(span: int, divisions: int = 20) -> int:
     return max(magnitude, round(raw / magnitude) * magnitude)
 
 
-def _clear_old_runs(directory: Path, keep: Path) -> None:
-    """Delete players from earlier runs, leaving only ``keep``."""
+def _clear_old_runs(directory: Path, keep: Path, since: float) -> None:
+    """Delete players from before this run started, leaving ``keep``.
+
+    A player written by another process *while* this run was going is not
+    "old": deleting it would silently remove that run's output.
+    """
     for old in directory.glob("simulation_*.html"):
         if old == keep:
             continue
         try:
+            if old.stat().st_mtime >= since:
+                continue
             old.unlink()
         except OSError:
             # A browser still holding the file must not fail the run.
@@ -429,6 +425,7 @@ class HtmlVisualizer:
         # Only the default output folder is pruned; an explicit path may point
         # at a directory this run does not own.
         self._output_dir: Path | None = None
+        self._started = time.time()
         if path is None:
             # Project-relative so the file does not land in whatever directory
             # the app was started from; microseconds keep runs from colliding.
@@ -471,14 +468,19 @@ class HtmlVisualizer:
         if self._written:
             return
         self._written = True
+        # A one-sided run never starts the visualiser, so it must not replace
+        # a real player with an empty page.
+        if not self.frames:
+            return
 
+        min_x, min_y, max_x, max_y = self.info.get("map_bounds") or map_bounds_for(0)
         run_info = {
             "sectors": self.sector_count,
             "agents": self.agent_count,
             "frames": len(self.frames),
-            "map_min": cfg.MAP_MIN,
-            "map_max": cfg.MAP_MAX,
-            "grid_step": _grid_step(cfg.MAP_SPAN),
+            "map_min": min_x,
+            "map_max": max_x,
+            "grid_step": _grid_step(int(max_x - min_x)),
             "human_max_hp": cfg.HUMAN_HEALTH_RANGE[1],
             "zombie_max_hp": cfg.ZOMBIE_HEALTH_RANGE[1],
             "parallel": self.info,
@@ -494,4 +496,4 @@ class HtmlVisualizer:
         # Write first, then prune: a failed write must not leave zero players.
         # An aborted run passes prune=False so the last complete player stays.
         if prune and self._output_dir is not None:
-            _clear_old_runs(self._output_dir, self.path)
+            _clear_old_runs(self._output_dir, self.path, self._started)

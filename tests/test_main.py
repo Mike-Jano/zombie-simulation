@@ -64,6 +64,24 @@ class ExitCodeTests(unittest.TestCase):
 
         exit_mock.assert_called_once()
 
+    def test_database_error_returns_one(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "ensure_config_file"))
+            stack.enter_context(patch.object(main, "print_banner"))
+            stack.enter_context(patch.object(main, "load_db_config", return_value={}))
+            stack.enter_context(
+                patch.object(
+                    main,
+                    "handle_simulation",
+                    side_effect=main.psycopg.Error("server went away"),
+                )
+            )
+            exit_mock = stack.enter_context(patch.object(main, "handle_exit"))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertEqual(main.main(["--run"]), 1)
+
+        exit_mock.assert_not_called()
+
 
 class ResetOrderTests(unittest.TestCase):
     def test_database_is_ensured_before_connecting(self):

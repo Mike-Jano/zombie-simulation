@@ -1,6 +1,6 @@
 """The simulation engine: cluster the map, simulate sectors, repeat.
 
-Sectors are independent - k-means assigns every agent to exactly one sector and
+Sectors are independent - the grid assigns every agent to exactly one sector and
 a visit loads, simulates and unloads before the next one starts - so the
 sectors of a round can run concurrently. ``runtime.sector_pool`` picks the
 widest backend the machine can actually use:
@@ -34,8 +34,13 @@ from db.db_manager import DBManager, _clamp_int
 from runtime.capabilities import ParallelPlan, resolve_event_shards, resolve_plan
 from runtime.sector_pool import POOL_FAILURES, SectorPool
 from src.sector_engine import SectorEngine, SectorOutcome, SectorReport, derive_seed
-from src.sector_task import SectorTask
-from utils.sectoring import build_sectors, resolve_sector_count
+from src.sector_task import SectorTask, _final_states
+from utils.sectoring import (
+    build_sectors,
+    map_bounds_for,
+    max_sectors_for,
+    resolve_sector_count,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,12 +181,16 @@ class Simulation:
         sectors: int | None = None,
         event_shards: int | None = None,
         seed: int | None = None,
+        map_bounds: tuple[float, float, float, float] | None = None,
+        max_sectors: int | None = None,
     ):
         self.db = db
         self.rng = rng or random.Random()
         self.visualizers = visualizers or []
         self.on_sector_complete = on_sector_complete
         self.seed = seed
+        self.map_bounds = map_bounds
+        self.max_sectors = max_sectors
 
         # ``None`` means "use the config / auto-detect".
         self.requested_workers = workers
@@ -235,6 +244,7 @@ class Simulation:
                 )
                 if initial_counts is None:
                     initial_counts = counts
+                    self._ensure_geometry(sum(counts))
                 final_counts = counts
                 kinds = {row[1] for row in rows}
                 if not rows:
@@ -249,7 +259,9 @@ class Simulation:
                 positions = {row[0]: (float(row[2]), float(row[3])) for row in rows}
                 types = {row[0]: row[1] for row in rows}
                 sector_count = resolve_sector_count(
-                    len(rows), requested=self.requested_sectors
+                    len(rows),
+                    requested=self.requested_sectors,
+                    max_sectors=self.max_sectors,
                 )
                 if self._collapse:
                     # Stagnation failsafe: one arena, so the two sides cannot
@@ -257,16 +269,17 @@ class Simulation:
                     sector_count = 1
                 sectors = build_sectors(
                     positions,
-                    rng=self.rng,
                     target_k=sector_count,
                     types=types,
+                    map_bounds=self.map_bounds,
                 )
 
                 # The pool is sized to the work: a run that produces one sector
                 # (200 agents) stays single-threaded instead of paying for
-                # workers that would have nothing to do.
-                if self._parallel is None:
-                    self._decide_parallel(len(sectors))
+                # workers that would have nothing to do.  It also shrinks when
+                # the living population halves, so idle processes and their
+                # database connections are released mid-run.
+                self._sync_pool_width(len(sectors))
 
                 round_index += 1
                 # Widest parallel width actually used (the last round of a run
@@ -348,9 +361,6 @@ class Simulation:
         self.report.rounds = round_index
         self.report.stop_reason = stop_reason
         self.report.duration = time.perf_counter() - started
-        self.report.workers = self.workers
-        self.report.backend = self._active_backend()
-        self.report.event_shards = self.event_shards
         self.report.cpu_count = self.plan.cpu_count if self.plan else 1
         self.report.seed = self.seed
         self.report.collapsed = self._collapse
@@ -361,8 +371,7 @@ class Simulation:
         self.report.humans_final, self.report.zombies_final = final_counts
         return self.report
 
-    @staticmethod
-    def _next_rows(outcomes) -> list | None:
+    def _next_rows(self, outcomes) -> list | None:
         """Rows for the next round, in the same shape/order as a SELECT.
 
         ``save_agents`` writes map-clamped integers, so the cached values are
@@ -383,8 +392,8 @@ class Simulation:
                     (
                         agent_id,
                         agent_type,
-                        _clamp_int(x_pos),
-                        _clamp_int(y_pos),
+                        _clamp_int(x_pos, self.map_bounds),
+                        _clamp_int(y_pos, self.map_bounds),
                     )
                 )
         rows.sort(key=lambda row: row[0])
@@ -405,6 +414,13 @@ class Simulation:
             return "collapse"
         return "stop"
 
+    def _ensure_geometry(self, agent_count: int) -> None:
+        """Fix the map size and sector ceiling from the starting population."""
+        if self.map_bounds is None:
+            self.map_bounds = map_bounds_for(agent_count)
+        if self.max_sectors is None:
+            self.max_sectors = max_sectors_for(agent_count)
+
     def prewarm(self, agent_count: int) -> None:
         """Start the workers early, while the caller is still busy.
 
@@ -414,9 +430,12 @@ class Simulation:
         """
         if self._parallel is not None or agent_count <= 0:
             return
+        self._ensure_geometry(agent_count)
         self.plan = resolve_plan(self.requested_workers, self.requested_backend)
         sector_count = resolve_sector_count(
-            agent_count, requested=self.requested_sectors
+            agent_count,
+            requested=self.requested_sectors,
+            max_sectors=self.max_sectors,
         )
         self._decide_parallel(sector_count)
         if self._pool is not None:
@@ -428,14 +447,25 @@ class Simulation:
             self._pool.close()
             self._pool = None
 
+    def _sync_pool_width(self, sector_count: int) -> None:
+        """Decide the pool once, then shrink it when the work halves."""
+        if self._parallel is None:
+            self._decide_parallel(sector_count)
+        elif self._parallel and sector_count <= self.workers // 2:
+            self._decide_parallel(sector_count)
+
     def _decide_parallel(self, sector_count: int) -> None:
-        """Choose the outer pool and the per-sector shard count once.
+        """Choose the outer pool and the per-sector shard count for this round.
 
         The outer pool and the inner shards share one worker budget, so a
         3-sector run on a 12-worker machine uses 3 outer threads and 4 shards
         per sector instead of 12 nested pools.  A single sector gets the whole
         budget as inner shards (the outer pool stays inactive).
         """
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
+
         plan = self.plan
         if plan is None or not plan.is_parallel or sector_count <= 0:
             self._parallel = False
@@ -457,6 +487,7 @@ class Simulation:
             # ticks across the whole budget.
             self._parallel = False
             self.workers = 1
+            self._backend_used = "serial"
             return
 
         self._pool = self._open_pool(outer_workers)
@@ -464,6 +495,7 @@ class Simulation:
         if not self._parallel:
             self.workers = 1
             self.event_shards = 1
+            self._backend_used = "serial"
         else:
             self._backend_used = self._pool.backend
 
@@ -519,6 +551,14 @@ class Simulation:
     def _run_round(
         self, sectors, round_index: int, round_seed: int
     ) -> list[SectorOutcome]:
+        # Keep the widest setup actually used: the pool can shrink mid-run, so
+        # the final values alone would make a parallel run look serial.
+        backend = self._active_backend()
+        self.report.workers = max(self.report.workers, self.workers)
+        self.report.event_shards = max(self.report.event_shards, self.event_shards)
+        if backend != "serial":
+            self.report.backend = backend
+
         parallel = self._pool is not None and self._pool.active
 
         tasks = [
@@ -531,6 +571,7 @@ class Simulation:
                 max_ticks=self.engine.max_ticks,
                 event_shards=self.event_shards,
                 db_config=self.db.config if parallel else None,
+                map_bounds=self.map_bounds,
             )
             for sector in sectors
         ]
@@ -578,16 +619,7 @@ class Simulation:
             self.humans.clear()
             self.zombies.clear()
             raise
-        outcome.final_states = [
-            (
-                agent.agent_id,
-                agent.agent_type,
-                agent.x_pos,
-                agent.y_pos,
-                agent.is_alive,
-            )
-            for agent in (*self.humans.values(), *self.zombies.values())
-        ]
+        outcome.final_states = _final_states(self.humans, self.zombies)
         self._unload_sector()
         return outcome
 
@@ -632,6 +664,7 @@ class Simulation:
             "cpu_count": self.plan.cpu_count if self.plan else 1,
             "sectors": sector_count,
             "seed": self.seed,
+            "map_bounds": list(self.map_bounds) if self.map_bounds else None,
         }
         for visualizer in self.visualizers:
             visualizer.start(sector_count, agent_count, info=info)

@@ -17,7 +17,7 @@ from src.human import Human  # noqa: E402
 from src.sector_engine import SectorEngine  # noqa: E402
 from src.zombie import Zombie  # noqa: E402
 
-BOUNDS = (float(cfg.MAP_MIN), float(cfg.MAP_MIN), float(cfg.MAP_MAX), float(cfg.MAP_MAX))
+BOUNDS = (-1000.0, -1000.0, 1000.0, 1000.0)
 
 
 def sector() -> SimpleNamespace:
