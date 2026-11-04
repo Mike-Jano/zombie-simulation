@@ -100,6 +100,7 @@ selector (0.5x–16x), and keyboard controls (Space, arrow keys). Humans are blu
 and zombies green, each with a health bar above the dot. It embeds sampled
 frames (every `FRAME_INTERVAL` ticks, capped at `MAX_FRAMES`, always keeping the
 first and last), so it works offline and can be moved or shared as a single file.
+Each new run replaces the older generated players in `output/`.
 
 ---
 
@@ -378,10 +379,25 @@ run that cut the pooled time from 2.2 s to 1.2 s when it was introduced.
   mistaken for a worker bottleneck.
 - Headless mode captures no frames at all, so it is the fastest way to run
   (and the right mode for benchmarks); HTML (`--mode html`) records a sampled
-  frame set for the player (every `FRAME_INTERVAL` ticks, capped at
-  `MAX_FRAMES`, with the first and last frame kept).
+  frame set for the player (every `FRAME_INTERVAL` ticks, capped by
+  `MAX_FRAMES` and `MAX_FRAME_RECORDS`, with the first and last frame kept).
 - Each worker holds its own PostgreSQL connection (at most `MAX_WORKERS`) and
   sectors write disjoint rows, so workers never contend for a row lock.
+
+---
+
+## Tests
+
+```
+.\venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+The data-layer tests are skipped by default. Run them against a scratch
+PostgreSQL with:
+
+```
+.\tools\test_db.ps1
+```
 
 ---
 
@@ -411,22 +427,23 @@ src/
 utils/
   combat.py                 hit chance and damage formulas
   sectoring.py              k-means clustering and the sector-count policy
-  spatial.py                uniform-grid nearest-enemy / radius index
+  spatial.py                uniform-grid nearest-enemy index
 vis/
   html_vis.py               self-contained HTML player
 tools/
   bench_parallel.py         worker/backend speed-up benchmark
+  test_db.ps1               opt-in PostgreSQL test runner
 tests/
   test_parallel.py          sector policy, determinism, backend equivalence
   test_event_parallel.py    tick sharding, chunk size, frame interval, cache
   test_spatial.py           spatial index vs brute-force reference
   test_movement.py          humans hold at weapon range, zombies keep closing
   test_map_bounds.py        config/schema/spawner map bounds
-  test_html_vis.py          HTML frame cap keeps the closing frame
+  test_html_vis.py          frame cap, record budget, prune on finish
   test_main.py              CLI population cap, exit codes, reset ordering
+  test_db_config.py         blank-password handling
   test_db_integration.py    opt-in real-PostgreSQL data-layer checks
 output/                     generated HTML runs (created on demand)
-plan.txt                    original specification
 ```
 
 ---

@@ -46,13 +46,6 @@ class Sector:
     def size(self) -> int:
         return len(self.agent_ids)
 
-    def describe(self) -> str:
-        left, bottom, right, top = self.bounds
-        return (
-            f"sector {self.index}: {self.size} agents, "
-            f"x[{left:.0f}, {right:.0f}] y[{bottom:.0f}, {top:.0f}]"
-        )
-
 
 def resolve_sector_count(
     agent_count: int,
@@ -208,6 +201,11 @@ def _kmeans(points: list[Point], k: int, rng: random.Random, max_iter: int = 40)
     if len(distinct) <= k:
         lookup = {point: index for index, point in enumerate(distinct)}
         return [lookup[point] for point in points]
+
+    # shortcut: coarse clustering above 20k agents; raise max_iter if sector
+    # quality matters more than the serial time between rounds.
+    if len(points) > 20_000:
+        max_iter = min(max_iter, 10)
 
     centers: list[Point] = [points[rng.randrange(len(points))]]
     while len(centers) < k:

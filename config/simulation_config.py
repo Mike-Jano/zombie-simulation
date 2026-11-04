@@ -132,4 +132,8 @@ MAX_AGENTS = 100_000
 # Presentation
 # --------------------------------------------------------------------------- #
 MAX_FRAMES = 2000            # safety cap for HTML frame capture
+# Total agent records kept across all frames. When exceeded, the player keeps
+# every other frame instead of dropping the middle of the run.
+# shortcut: 1M records trades detail for memory; raise it for a richer player.
+MAX_FRAME_RECORDS = 1_000_000
 HTML_OUTPUT_DIR = "output"

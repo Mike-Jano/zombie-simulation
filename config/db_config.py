@@ -117,9 +117,16 @@ def load_db_config() -> dict:
             config[key] = raw
 
     # 1. the INI file wins over both
-    for key, value in _read_ini().items():
-        if key in config and value != "":
+    ini = _read_ini()
+    for key, value in ini.items():
+        if key not in config:
+            continue
+        if value != "":
             config[key] = value
+        elif key == "password":
+            # An explicit blank means trust auth / .pgpass, never the built-in
+            # default. The environment still gets a say above.
+            config[key] = os.getenv("DB_PASSWORD") or ""
 
     try:
         config["port"] = int(config["port"])

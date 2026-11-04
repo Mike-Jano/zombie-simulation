@@ -251,7 +251,7 @@ class SectorEngine:
             while iteration < self.max_ticks:
                 iteration += 1
 
-                moved, gap = self._movement_phase(
+                moved, gap, human_index = self._movement_phase(
                     sector,
                     humans,
                     zombies,
@@ -269,6 +269,7 @@ class SectorEngine:
                     self.event_shards,
                     self.chunk_size,
                     collect_events=self.capture_frames,
+                    human_index=human_index,
                 )
 
                 alive_h = sum(1 for agent in humans.values() if agent.is_alive)
@@ -324,7 +325,7 @@ class SectorEngine:
         executor=None,
         shards: int = 1,
         chunk_size: int = 0,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, SpatialIndex]:
         """Every living agent walks toward its nearest living enemy.
 
         Humans move first against the pre-move zombie snapshot; zombies then
@@ -332,9 +333,9 @@ class SectorEngine:
         serial loop always used, and it lets each group run in parallel because
         nobody in a group reads another mover's new position.
 
-        Returns ``(total distance moved, distance to the closest enemy pair)``.
-        The second value feeds the stall detector, so a sector that cannot make
-        progress is stopped even if combat never started.
+        Returns ``(total distance moved, distance to the closest enemy pair,
+        post-move human index)``.  The gap feeds the stall detector, and the
+        index is reused by the combat phase because humans do not move again.
         """
         owned = executor is None
         if owned:
@@ -380,42 +381,30 @@ class SectorEngine:
                     if plan.gap < closest_gap:
                         closest_gap = plan.gap
 
-            return moved_total, closest_gap
+            return moved_total, closest_gap, human_index
         finally:
             if owned:
                 executor.close()
 
     @staticmethod
     def _combat_phase(
-        sector_or_humans,
-        humans_or_zombies,
-        zombies_or_rng,
-        rng: random.Random | None = None,
+        sector,
+        humans: Mapping[int, Agent],
+        zombies: Mapping[int, Agent],
+        rng: random.Random,
         executor=None,
         shards: int = 1,
         chunk_size: int = 0,
         collect_events: bool = True,
+        human_index: SpatialIndex | None = None,
     ) -> tuple[list[str], int]:
         """Resolve every attack from the same snapshot (simultaneous).
 
         Targeting is planned in parallel; RNG rolls and damage application are
         merged in canonical order (humans, then zombies, ascending id) so the
-        random stream is identical to the serial loop.
-
-        The legacy three-argument form ``_combat_phase(humans, zombies, rng)``
-        is still accepted for the movement tests; the engine passes the sector
-        first so the spatial grid can use its bounds.
+        random stream is identical to the serial loop.  ``human_index`` is the
+        post-move index from the movement phase; pass it to avoid rebuilding it.
         """
-        if rng is None:
-            sector = None
-            humans = sector_or_humans
-            zombies = humans_or_zombies
-            rng = zombies_or_rng
-        else:
-            sector = sector_or_humans
-            humans = humans_or_zombies
-            zombies = zombies_or_rng
-
         owned = executor is None
         if owned:
             executor = make_executor(shards)
@@ -424,7 +413,8 @@ class SectorEngine:
             humans_list = list(humans.values())
             zombies_list = list(zombies.values())
 
-            human_index = SpatialIndex(humans_list, bounds=bounds)
+            if human_index is None:
+                human_index = SpatialIndex(humans_list, bounds=bounds)
             zombie_index = SpatialIndex(zombies_list, bounds=bounds)
 
             human_plan_chunks = executor.map(
@@ -553,6 +543,5 @@ class SectorEngine:
             "note": note,
             "bounds": [float(value) for value in sector.bounds],
             "events": events[:10],
-            "event_count": len(events),
         }
         frames.append((snapshot, meta))

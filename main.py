@@ -220,14 +220,20 @@ def handle_settings(config: dict) -> dict:
         else:
             updated[key] = raw
 
-    password = getpass.getpass("  Password [hidden]: ")
-    if password:
+    password = getpass.getpass(
+        "  Password [hidden, blank = keep, '-' = clear]: "
+    )
+    if password == "-":
+        updated["password"] = ""
+    elif password:
         updated["password"] = password
 
+    if not try_bootstrap(updated):
+        print("Not saved - the database test failed (see above).")
+        return config
     saved_to = save_db_config(updated)
     print(f"Saved to {saved_to}")
-    if try_bootstrap(updated):
-        print("Connection OK.")
+    print("Connection OK.")
     return updated
 
 
@@ -447,6 +453,11 @@ def main(argv: list[str] | None = None) -> int:
             print("Interrupted - clearing agents from the database.")
             handle_exit(config)
             return 130
+        except RuntimeError as exc:
+            print()
+            print(f"Run aborted: {exc}")
+            handle_exit(config)
+            return 1
         return 0 if ok else 1
 
     try_bootstrap(config)
@@ -479,6 +490,10 @@ def main(argv: list[str] | None = None) -> int:
             print("Interrupted - clearing agents from the database.")
             handle_exit(config)
             return 130
+        except RuntimeError as exc:
+            print()
+            print(f"Run aborted: {exc}")
+            print("The next run clears the leftover agents automatically.")
 
 
 if __name__ == "__main__":

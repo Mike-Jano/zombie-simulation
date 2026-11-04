@@ -95,7 +95,7 @@ class HumanStandoffTests(unittest.TestCase):
         human = make_human()
         zombie = make_zombie(human.max_range)
         events, attacks = SectorEngine._combat_phase(
-            {human.agent_id: human}, {zombie.agent_id: zombie}, random.Random(0)
+            sector(), {human.agent_id: human}, {zombie.agent_id: zombie}, random.Random(0)
         )
         self.assertEqual(attacks, 1)
         self.assertTrue(events[0].startswith("H"), events)

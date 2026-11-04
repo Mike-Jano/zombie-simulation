@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass, field
 
 from config import simulation_config as cfg
-from db.db_manager import DBManager
+from db.db_manager import DBManager, _clamp_int
 from runtime.capabilities import ParallelPlan, resolve_event_shards, resolve_plan
 from runtime.sector_pool import POOL_FAILURES, SectorPool
 from src.sector_engine import SectorEngine, SectorOutcome, SectorReport, derive_seed
@@ -220,6 +220,7 @@ class Simulation:
         stop_reason = "round limit"
         initial_counts: tuple[int, int] | None = None
         final_counts = (0, 0)
+        completed = False
 
         try:
             while round_index < cfg.MAX_ROUNDS and world_ticks < cfg.MAX_TOTAL_TICKS:
@@ -280,10 +281,6 @@ class Simulation:
                 outcomes = self._run_round(
                     sectors, round_index, self.rng.getrandbits(64)
                 )
-                if outcomes is None:
-                    # The pool died mid-round; the next round runs serially.
-                    self._cached_rows = None
-                    continue
 
                 # Cluster the next round from what the sector visits left
                 # behind instead of asking PostgreSQL to return every row
@@ -340,10 +337,13 @@ class Simulation:
                     if world_ticks >= cfg.MAX_TOTAL_TICKS
                     else "round limit"
                 )
+            completed = True
         finally:
             self.close()
+            # An aborted run keeps its partial player but must not delete the
+            # previous complete one.
             for visualizer in self.visualizers:
-                visualizer.finish()
+                visualizer.finish(prune=completed)
 
         self.report.rounds = round_index
         self.report.stop_reason = stop_reason
@@ -383,8 +383,8 @@ class Simulation:
                     (
                         agent_id,
                         agent_type,
-                        max(int(cfg.MAP_MIN), min(int(cfg.MAP_MAX), int(round(x_pos)))),
-                        max(int(cfg.MAP_MIN), min(int(cfg.MAP_MAX), int(round(y_pos)))),
+                        _clamp_int(x_pos),
+                        _clamp_int(y_pos),
                     )
                 )
         rows.sort(key=lambda row: row[0])
@@ -503,7 +503,7 @@ class Simulation:
     def _disable_pool(self, exc: BaseException) -> None:
         print(
             f"  [parallel] worker pool failed "
-            f"({type(exc).__name__}: {exc}); continuing single-threaded"
+            f"({type(exc).__name__}: {exc}); stopping this run"
         )
         if self._pool is not None:
             self._pool.close()
@@ -518,7 +518,7 @@ class Simulation:
     # ------------------------------------------------------------------ #
     def _run_round(
         self, sectors, round_index: int, round_seed: int
-    ) -> list[SectorOutcome] | None:
+    ) -> list[SectorOutcome]:
         parallel = self._pool is not None and self._pool.active
 
         tasks = [
@@ -541,7 +541,12 @@ class Simulation:
                 outcomes = self._pool.map(tasks)
             except POOL_FAILURES as exc:
                 self._disable_pool(exc)
-                return None
+                # Workers may already have committed their sectors, so the
+                # round is half-written. Continuing would mix two points in
+                # time; restart instead.
+                raise RuntimeError(
+                    "worker pool failed mid-round; restart the run"
+                ) from exc
 
         if outcomes is None:
             outcomes = [self._run_sector_serial(task) for task in tasks]

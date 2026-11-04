@@ -410,22 +410,39 @@ def _grid_step(span: int, divisions: int = 20) -> int:
     return max(magnitude, round(raw / magnitude) * magnitude)
 
 
+def _clear_old_runs(directory: Path, keep: Path) -> None:
+    """Delete players from earlier runs, leaving only ``keep``."""
+    for old in directory.glob("simulation_*.html"):
+        if old == keep:
+            continue
+        try:
+            old.unlink()
+        except OSError:
+            # A browser still holding the file must not fail the run.
+            pass
+
+
 class HtmlVisualizer:
     """Collects frames and writes a standalone HTML player at the end."""
 
     def __init__(self, path: str | Path | None = None):
+        # Only the default output folder is pruned; an explicit path may point
+        # at a directory this run does not own.
+        self._output_dir: Path | None = None
         if path is None:
             # Project-relative so the file does not land in whatever directory
             # the app was started from; microseconds keep runs from colliding.
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             root = Path(__file__).resolve().parents[1]
-            path = root / cfg.HTML_OUTPUT_DIR / f"simulation_{stamp}.html"
+            self._output_dir = root / cfg.HTML_OUTPUT_DIR
+            path = self._output_dir / f"simulation_{stamp}.html"
         self.path = Path(path)
         self.frames: list[dict] = []
         self.sector_count = 0
         self.agent_count = 0
         self.info: dict = {}
         self._written = False
+        self._records = 0
 
     # ------------------------------------------------------------------ #
     def start(self, sector_count: int, agent_count: int, info: dict | None = None) -> None:
@@ -435,14 +452,22 @@ class HtmlVisualizer:
 
     def frame(self, snapshot: list[tuple], meta: dict) -> None:
         frame = {"meta": meta, "agents": [list(agent) for agent in snapshot]}
+        self._records += len(frame["agents"])
+        # Keep a sample of the whole run: halve the stored frames when a budget
+        # is hit, instead of dropping everything after the cap.
+        if len(self.frames) > 1 and (
+            len(self.frames) >= cfg.MAX_FRAMES
+            or self._records > cfg.MAX_FRAME_RECORDS
+        ):
+            self.frames = self.frames[::2]
+            self._records = sum(len(item["agents"]) for item in self.frames)
         if len(self.frames) >= cfg.MAX_FRAMES:
-            # The cap must not hide the end of the run.
             if meta.get("ended") and self.frames:
                 self.frames[-1] = frame
             return
         self.frames.append(frame)
 
-    def finish(self) -> None:
+    def finish(self, prune: bool = True) -> None:
         if self._written:
             return
         self._written = True
@@ -466,3 +491,7 @@ class HtmlVisualizer:
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(html, encoding="utf-8")
+        # Write first, then prune: a failed write must not leave zero players.
+        # An aborted run passes prune=False so the last complete player stays.
+        if prune and self._output_dir is not None:
+            _clear_old_runs(self._output_dir, self.path)

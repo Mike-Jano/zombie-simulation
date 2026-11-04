@@ -7,6 +7,7 @@ import random
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -392,6 +393,35 @@ class ReportCountTests(unittest.TestCase):
         self.assertEqual((report.humans_start, report.humans_end), (5, 5))
         self.assertEqual((report.zombies_start, report.zombies_end), (0, 0))
         self.assertIn("Humans : 5 -> 5 alive", report.render())
+
+
+class _RecordingVisualizer:
+    def __init__(self):
+        self.prune = None
+
+    def start(self, *args, **kwargs):
+        pass
+
+    def finish(self, prune=True):
+        self.prune = prune
+
+
+class AbortedRunTests(unittest.TestCase):
+    def test_abort_keeps_the_previous_player(self):
+        visualizer = _RecordingVisualizer()
+        simulation = Simulation(
+            FakeDB(make_agents(300, 300, seed=3)),
+            visualizers=[visualizer],
+            workers=1,
+            backend="serial",
+        )
+        with patch.object(
+            simulation, "_run_round", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                simulation.run()
+
+        self.assertFalse(visualizer.prune)
 
 
 if __name__ == "__main__":

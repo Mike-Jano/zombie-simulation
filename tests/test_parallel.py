@@ -6,13 +6,16 @@ import copy
 import random
 import sys
 import unittest
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from runtime.capabilities import resolve_plan  # noqa: E402
+from config import simulation_config as cfg  # noqa: E402
+from runtime.capabilities import resolve_plan, resolve_workers  # noqa: E402
 from runtime.sector_pool import SectorPool  # noqa: E402
 from src.sector_engine import derive_seed  # noqa: E402
 from src.sector_task import SectorTask, simulate_sector_task  # noqa: E402
@@ -112,7 +115,7 @@ class SectorPolicyTests(unittest.TestCase):
         )
         for sector in sectors:
             kinds = {types[agent_id] for agent_id in sector.agent_ids}
-            self.assertEqual(kinds, {"human", "zombie"}, sector.describe())
+            self.assertEqual(kinds, {"human", "zombie"}, repr(sector))
 
     def test_segregated_map_collapses_to_one_arena(self):
         # Humans on the left, zombies on the right: every spatial cluster is
@@ -156,7 +159,7 @@ class SectorPolicyTests(unittest.TestCase):
             self.assertEqual(
                 {types[agent_id] for agent_id in sector.agent_ids},
                 {"human", "zombie"},
-                sector.describe(),
+                repr(sector),
             )
         # The lone zombie is now in an arena that contains at least one human.
         host = next(s for s in sectors if 99 in s.agent_ids)
@@ -339,6 +342,32 @@ class SeedTests(unittest.TestCase):
         self.assertNotEqual(derive_seed(7, 3), derive_seed(7, 4))
         self.assertNotEqual(derive_seed(7, 3), derive_seed(8, 3))
         self.assertTrue(0 <= derive_seed(7, 3) < 2**64)
+
+
+class WorkerCapTests(unittest.TestCase):
+    def test_explicit_worker_count_is_capped(self):
+        self.assertLessEqual(resolve_workers(100_000), cfg.MAX_WORKERS)
+
+
+class _FailingPool:
+    active = True
+    backend = "process"
+
+    def map(self, tasks):
+        raise BrokenProcessPool("boom")
+
+    def close(self):
+        pass
+
+
+class PoolFailureTests(unittest.TestCase):
+    def test_pool_failure_stops_instead_of_continuing(self):
+        simulation = Simulation(SimpleNamespace(config={}))
+        simulation._pool = _FailingPool()
+        simulation._parallel = True
+        sector = SimpleNamespace(index=1, agent_ids=[], bounds=(0.0, 0.0, 1.0, 1.0))
+        with self.assertRaises(RuntimeError):
+            simulation._run_round([sector], 1, 123)
 
 
 if __name__ == "__main__":

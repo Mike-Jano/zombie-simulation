@@ -118,34 +118,6 @@ class SpatialIndexTests(unittest.TestCase):
             for y in (-200, -100, 0, 50, 100, 200):
                 assert_same(self, index, agents, x, y)
 
-    def test_within_matches_brute_force(self):
-        rng = random.Random(99)
-        agents = [
-            agent(i + 1, rng.uniform(-200, 200), rng.uniform(-200, 200))
-            for i in range(150)
-        ]
-        index = SpatialIndex(agents)
-        for _ in range(20):
-            x = rng.uniform(-200, 200)
-            y = rng.uniform(-200, 200)
-            radius = rng.uniform(0, 120)
-            got = index.within(x, y, radius)
-            expected = []
-            for candidate in agents:
-                dx = candidate.x_pos - x
-                dy = candidate.y_pos - y
-                dist_sq = dx * dx + dy * dy
-                if dist_sq <= radius * radius:
-                    expected.append((candidate, dist_sq))
-            expected.sort(key=lambda item: (item[1], item[0].agent_id))
-            self.assertEqual(
-                [item[0].agent_id for item in got],
-                [item[0].agent_id for item in expected],
-            )
-            for (got_agent, got_distance), (exp_agent, exp_sq) in zip(got, expected):
-                self.assertEqual(got_agent.agent_id, exp_agent.agent_id)
-                self.assertAlmostEqual(got_distance * got_distance, exp_sq, places=9)
-
     def test_agents_outside_bounds_remain_findable(self):
         # A caller can pass tight sector bounds; an agent outside them must
         # still be targetable instead of silently disappearing.
@@ -154,26 +126,6 @@ class SpatialIndexTests(unittest.TestCase):
         index = SpatialIndex(agents, bounds=bounds)
         assert_same(self, index, agents, 90, 90)
         self.assertEqual(index.nearest(90, 90)[0].agent_id, 2)
-        self.assertIn(
-            2, {found.agent_id for found, _ in index.within(90, 90, 1000)}
-        )
-
-    def test_within_finds_out_of_bounds_agent_from_outside_query(self):
-        # Both the query and the agent are left of the grid. The agent is
-        # clamped into edge cell 0, but the radius window is entirely outside
-        # the grid, so within() must fall back to a scan.
-        agents = [agent(1, -10000, 0), agent(2, 0, 0)]
-        index = SpatialIndex(agents, bounds=(-100.0, -100.0, 100.0, 100.0))
-
-        found = index.within(-9000, 0, 2000)
-        self.assertEqual([item.agent_id for item, _ in found], [1])
-
-    def test_id_only_variant(self):
-        agents = [agent(1, 0, 0), agent(2, 10, 0)]
-        index = SpatialIndex(agents)
-        winner_id, distance = index.nearest_id(5, 0)
-        self.assertEqual(winner_id, 1)
-        self.assertAlmostEqual(distance, 5.0)
 
 
 if __name__ == "__main__":

@@ -37,7 +37,6 @@ def chunked(items, parts: int) -> list[list]:
 class SerialTickExecutor:
     """Run every chunk inline on the calling thread."""
 
-    name = "serial"
     active = False
 
     def map(self, fn, chunks):
@@ -59,8 +58,6 @@ class ThreadTickExecutor:
     ``max_workers`` is deliberately independent of the sector count: the
     simulation decides how much of its global worker budget this sector gets.
     """
-
-    name = "thread"
 
     def __init__(self, max_workers: int = 1):
         self.max_workers = max(1, int(max_workers))

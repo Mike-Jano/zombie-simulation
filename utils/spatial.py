@@ -140,54 +140,9 @@ class SpatialIndex:
             return None, _INF
         return best, math.sqrt(best_sq)
 
-    def nearest_id(self, x: float, y: float, exclude_id: int | None = None):
-        agent, distance = self.nearest(x, y, exclude_id=exclude_id)
-        return (None if agent is None else agent.agent_id), distance
-
-    def within(self, x: float, y: float, radius: float) -> list[tuple[object, float]]:
-        """Every living agent within ``radius`` (inclusive), nearest first."""
-        if not self.agents or radius < 0.0:
-            return []
-        radius_sq = radius * radius
-
-        cx, cy = self._cell(x, y)
-        if not (0 <= cx < self.cols and 0 <= cy < self.rows):
-            # Agents beyond the grid are clamped into an edge cell, so a query
-            # beyond that edge cannot rely on the ring window. Scan instead.
-            found = []
-            for agent in self.agents:
-                dx = agent.x_pos - x
-                dy = agent.y_pos - y
-                dist_sq = dx * dx + dy * dy
-                if dist_sq <= radius_sq:
-                    found.append((agent, dist_sq, agent.agent_id))
-            return self._finish_within(found)
-
-        min_cx = self._cell_index(x - radius - self.min_x)
-        max_cx = self._cell_index(x + radius - self.min_x)
-        min_cy = self._cell_index(y - radius - self.min_y)
-        max_cy = self._cell_index(y + radius - self.min_y)
-
-        found: list[tuple[object, float, int]] = []
-        for gx in range(max(0, min_cx), min(self.cols - 1, max_cx) + 1):
-            for gy in range(max(0, min_cy), min(self.rows - 1, max_cy) + 1):
-                for agent in self.cells.get((gx, gy), ()):
-                    dx = agent.x_pos - x
-                    dy = agent.y_pos - y
-                    dist_sq = dx * dx + dy * dy
-                    if dist_sq <= radius_sq:
-                        found.append((agent, dist_sq, agent.agent_id))
-
-        return self._finish_within(found)
-
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _finish_within(found):
-        found.sort(key=lambda item: (item[1], item[2]))
-        return [(agent, math.sqrt(dist_sq)) for agent, dist_sq, _ in found]
-
     def _cell(self, x: float, y: float) -> tuple[int, int]:
         return self._cell_index(x - self.min_x), self._cell_index(y - self.min_y)
 

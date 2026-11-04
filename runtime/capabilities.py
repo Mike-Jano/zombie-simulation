@@ -66,7 +66,9 @@ def resolve_workers(requested: int | None = None) -> int:
         raw = 0
 
     if raw > 0:
-        workers = raw
+        # MAX_WORKERS is the documented ceiling, and every worker opens a
+        # PostgreSQL connection, so an explicit value cannot raise it.
+        workers = min(raw, int(cfg.MAX_WORKERS))
     else:
         workers = min(int(cfg.MAX_WORKERS), cpu_count())
     return max(1, workers)
