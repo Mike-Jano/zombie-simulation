@@ -9,11 +9,15 @@ Everything here can be edited without touching the simulation code.
 # The map is sized from the starting population so every agent gets roughly the
 # same amount of space:
 #
-#     half = max(MAP_MIN_HALF_EXTENT,
+#     raw  = max(MAP_MIN_HALF_EXTENT,
 #                ceil(sqrt(total_agents * MAP_AREA_PER_AGENT) / 2))
+#     half = raw snapped to the nearest MAP_SIZE_STEP
 #
-# The minimum keeps tiny runs in a usable arena; there is no upper limit.
-MAP_MIN_HALF_EXTENT = 50
+# The snap keeps every map an integer box on a 100-unit grid (-2700..2700,
+# -2800..2800, ...). The minimum keeps tiny runs in a usable arena; there is no
+# upper limit.
+MAP_MIN_HALF_EXTENT = 100
+MAP_SIZE_STEP = 100
 MAP_AREA_PER_AGENT = 1000
 
 # --------------------------------------------------------------------------- #

@@ -45,6 +45,49 @@ class FrameCapTests(unittest.TestCase):
         self.assertEqual(visualizer.frames[-1]["meta"]["iteration"], 19)
 
 
+class LayoutCaptureTests(unittest.TestCase):
+    def test_layouts_collect_unique_bounds_per_round(self):
+        visualizer = HtmlVisualizer(path="unused.html")
+        visualizer.frame(snapshot(0.0), {
+            "iteration": 1, "round": 1, "bounds": [0.0, 0.0, 10.0, 10.0],
+        })
+        visualizer.frame(snapshot(0.0), {
+            "iteration": 1, "round": 1, "bounds": [0.0, 0.0, 10.0, 10.0],
+        })
+        visualizer.frame(snapshot(0.0), {
+            "iteration": 1, "round": 1, "bounds": [10.0, 10.0, 20.0, 20.0],
+        })
+        visualizer.frame(snapshot(0.0), {
+            "iteration": 1, "round": 2, "bounds": [0.0, 0.0, 5.0, 5.0],
+        })
+
+        self.assertEqual(
+            visualizer.layouts[1],
+            [[0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]],
+        )
+        self.assertEqual(visualizer.layouts[2], [[0.0, 0.0, 5.0, 5.0]])
+
+    def test_generated_player_has_controls_and_bottom_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "player.html"
+            visualizer = HtmlVisualizer(path=path)
+            visualizer.start(1, 1)
+            visualizer.frame(snapshot(0.0), {
+                "iteration": 1, "round": 1, "bounds": [0.0, 0.0, 10.0, 10.0],
+            })
+            visualizer.finish()
+
+            html = path.read_text(encoding="utf-8")
+            self.assertNotIn("fullscreen", html.lower())
+            self.assertIn('id="panels"', html)
+            self.assertIn("prefers-reduced-motion", html)
+            self.assertIn("<main>", html)
+            self.assertIn('class="sr-only"', html)
+            self.assertIn('tag === "BUTTON"', html)
+            self.assertIn('"1":[[0.0,0.0,10.0,10.0]]', html)
+            self.assertNotIn("__LAYOUTS__", html)
+
+
 class PruneOldRunsTests(unittest.TestCase):
     def test_keeps_new_run_and_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:

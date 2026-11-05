@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import sys
 import unittest
@@ -19,13 +20,24 @@ from utils.sectoring import map_bounds_for  # noqa: E402
 from vis.html_vis import _grid_step  # noqa: E402
 
 
-class DynamicBoundsTests(unittest.TestCase):
-    def test_minimum_map_is_fifty_units_each_way(self):
-        self.assertEqual(map_bounds_for(0), (-50.0, -50.0, 50.0, 50.0))
-        self.assertEqual(map_bounds_for(1), (-50.0, -50.0, 50.0, 50.0))
-        self.assertEqual(map_bounds_for(10), (-50.0, -50.0, 50.0, 50.0))
+def _expected_half(count: int) -> int:
+    raw = max(
+        int(cfg.MAP_MIN_HALF_EXTENT),
+        int(math.ceil(math.sqrt(count * cfg.MAP_AREA_PER_AGENT) / 2.0)),
+    )
+    step = int(cfg.MAP_SIZE_STEP)
+    return max(step, ((raw + step // 2) // step) * step)
 
-    def test_map_grows_with_population(self):
+
+class DynamicBoundsTests(unittest.TestCase):
+    def test_minimum_map_uses_the_snapped_minimum(self):
+        half = _expected_half(0)
+        expected = (-half, -half, half, half)
+        self.assertEqual(map_bounds_for(0), expected)
+        self.assertEqual(map_bounds_for(1), expected)
+        self.assertEqual(map_bounds_for(10), expected)
+
+    def test_map_grows_in_whole_grid_steps(self):
         previous = 0
         for count in (10, 80, 500, 1500, 3000, 6000, 60_000):
             half = map_bounds_for(count)[2]
@@ -33,17 +45,22 @@ class DynamicBoundsTests(unittest.TestCase):
             self.assertGreaterEqual(half, cfg.MAP_MIN_HALF_EXTENT)
             previous = half
 
-    def test_area_tracks_the_agent_budget(self):
-        for count in (1000, 3000, 10_000, 100_000):
-            half = map_bounds_for(count)[2]
-            area = (2 * half) ** 2
+    def test_bounds_are_integers_on_the_grid(self):
+        for count in (0, 1, 10, 80, 500, 1500, 3000, 6000, 60_000):
+            bounds = map_bounds_for(count)
             with self.subTest(count=count):
-                # ceil() can round the half-extent up a little, never down.
-                self.assertGreaterEqual(area / count, cfg.MAP_AREA_PER_AGENT)
-                self.assertLess(area / count, cfg.MAP_AREA_PER_AGENT * 1.05)
+                self.assertTrue(all(isinstance(value, int) for value in bounds))
+                self.assertEqual(bounds[0], -bounds[2])
+                self.assertEqual(bounds[1], -bounds[3])
+                self.assertEqual(bounds[2] % cfg.MAP_SIZE_STEP, 0)
+                self.assertEqual(bounds[2], _expected_half(count))
+
+    def test_a_raw_2733_map_snaps_to_2700_then_2800(self):
+        self.assertEqual(map_bounds_for(29_860)[2], 2700)
+        self.assertEqual(map_bounds_for(30_230)[2], 2800)
 
     def test_four_thousand_agents_get_a_two_thousand_wide_map(self):
-        self.assertEqual(map_bounds_for(4000), (-1000.0, -1000.0, 1000.0, 1000.0))
+        self.assertEqual(map_bounds_for(4000), (-1000, -1000, 1000, 1000))
 
 
 class SchemaBoundsTests(unittest.TestCase):

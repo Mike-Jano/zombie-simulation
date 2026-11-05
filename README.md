@@ -4,10 +4,6 @@ A 2D agent simulation where human and zombie agents live in PostgreSQL, are
 loaded into Python a sector at a time, fight until one side is wiped out, and
 are written back to the database before being unloaded from memory.
 
-```
-C:\Users\mjano\Documents\Default Project\ZG-Prototype
-```
-
 ---
 
 
@@ -97,10 +93,13 @@ Database: postgres@localhost:5432/zombie_sim
 
 The HTML player has play/pause, prev/next, restart, a scrub slider, a speed
 selector (0.5x–16x), and keyboard controls (Space, arrow keys). Humans are blue
-and zombies green, each with a health bar above the dot. It embeds sampled
-frames (every `FRAME_INTERVAL` ticks, capped at `MAX_FRAMES`, always keeping the
-first and last), so it works offline and can be moved or shared as a single file.
-Each new run replaces the older generated players in `output/`.
+and zombies green; a health bar appears
+over a dot once it is damaged. Every sector in the current round is outlined,
+the active one is highlighted in amber, and faded dots are agents last seen in
+previous sectors. It embeds sampled frames (every `FRAME_INTERVAL` ticks, capped
+at `MAX_FRAMES`, always keeping the first and last), so it works offline and can
+be moved or shared as a single file. Each new run replaces the older generated
+players in `output/`.
 
 ---
 
@@ -332,7 +331,7 @@ python main.py --run --humans 1500 --zombies 1500 --seed 7 --workers 12
 ```
 
 `--sectors N` still pins the count when you want to force a particular split.
-The report and the HTML header record the backend, worker count, event-shard
+The report and the HTML footer record the backend, worker count, event-shard
 count, sector count and seed of the run. None of `--workers`, `--backend` or
 `--event-shards` changes the result: sharding only reorders *who computes* a
 proposal, never the proposal itself.
@@ -477,8 +476,9 @@ output/                     generated HTML runs (created on demand)
 Everything is in `config/simulation_config.py` – no other file needs editing:
 
 ```python
-# Map: minimum half-extent and target area per starting agent.
-MAP_MIN_HALF_EXTENT = 50
+# Map: minimum half-extent, size step and target area per starting agent.
+MAP_MIN_HALF_EXTENT = 100
+MAP_SIZE_STEP = 100
 MAP_AREA_PER_AGENT = 1000
 
 # Sectoring: one sector per AGENTS_PER_SECTOR living agents, with the ceiling
@@ -535,14 +535,16 @@ The health and speed ranges only shape new spawns.
 The map is chosen once per run from the starting population:
 
 ```
-half = max(MAP_MIN_HALF_EXTENT,
+raw  = max(MAP_MIN_HALF_EXTENT,
            ceil(sqrt(total_agents * MAP_AREA_PER_AGENT) / 2))
+half = raw snapped to the nearest MAP_SIZE_STEP
 ```
 
 Area grows with the population, so average spacing (and how long a chase takes)
-stays roughly constant. The smallest map is `-50…50` on each axis; there is no
-upper limit. The HTML player records the run's actual extent and grid step, so
-it cannot drift out of sync.
+stays roughly constant. The extent is always a whole number on a 100-unit grid:
+`-2700…2700`, then `-2800…2800`. The smallest map is `-100…100` on each axis;
+there is no upper limit. The HTML player records the run's actual extent and
+grid step, so it cannot drift out of sync.
 
 Older databases may still carry the fixed `-1000…1000` `CHECK` constraints.
 Bootstrap drops those constraints (leaving every agent row untouched) because a

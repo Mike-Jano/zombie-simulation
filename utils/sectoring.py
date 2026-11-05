@@ -36,18 +36,22 @@ Bounds = tuple[float, float, float, float]
 
 
 def map_bounds_for(agent_count: int) -> Bounds:
-    """The -/+ extent of the map for a run with ``agent_count`` agents.
+    """The -/+ integer extent of the map for a run with ``agent_count`` agents.
 
     Area grows linearly with the population, so average spacing (and therefore
     how long a chase takes) stays roughly the same from a tiny run to a huge
-    one. There is deliberately no upper clamp.
+    one. The extent is snapped to a ``MAP_SIZE_STEP`` grid, so maps only grow in
+    100-unit steps (-2700..2700, then -2800..2800). There is deliberately no
+    upper clamp.
     """
     total = max(0, int(agent_count))
-    half = max(
+    raw = max(
         int(cfg.MAP_MIN_HALF_EXTENT),
         int(math.ceil(math.sqrt(total * cfg.MAP_AREA_PER_AGENT) / 2.0)),
     )
-    return (-float(half), -float(half), float(half), float(half))
+    step = max(1, int(cfg.MAP_SIZE_STEP))
+    half = max(step, ((raw + step // 2) // step) * step)
+    return (-half, -half, half, half)
 
 
 def max_sectors_for(agent_count: int) -> int:
