@@ -116,12 +116,6 @@ class SectorPool:
         if self._logger is not None:
             self._logger(message)
 
-    def __enter__(self) -> "SectorPool":
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        self.close()
-
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         state = "active" if self.active else "inactive"
         return f"SectorPool({self.backend}, workers={self.workers}, {state})"

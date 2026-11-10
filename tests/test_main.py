@@ -31,6 +31,49 @@ class AgentLimitTests(unittest.TestCase):
         db_class.assert_not_called()
 
 
+class RunStartOrderTests(unittest.TestCase):
+    def test_database_is_ensured_before_connecting(self):
+        calls: list[str] = []
+
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                calls.append("db")
+
+            def connect(self):
+                calls.append("connect")
+                raise RuntimeError("stop here")
+
+            def close(self):
+                pass
+
+        def ensure(_config):
+            calls.append("ensure")
+            return True
+
+        args = argparse.Namespace(
+            run=True,
+            humans=1,
+            zombies=1,
+            seed=1,
+            mode="headless",
+            headless=True,
+            workers=1,
+            backend="serial",
+            sectors=None,
+            event_shards=None,
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", side_effect=ensure)
+            )
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(RuntimeError):
+                main.handle_simulation({}, args)
+
+        self.assertEqual(calls[:2], ["ensure", "db"])
+
+
 class ExitCodeTests(unittest.TestCase):
     def _run(self, ok: bool) -> int:
         with ExitStack() as stack:
@@ -81,6 +124,31 @@ class ExitCodeTests(unittest.TestCase):
             self.assertEqual(main.main(["--run"]), 1)
 
         exit_mock.assert_not_called()
+
+    def test_eof_inside_a_prompt_exits_cleanly(self):
+        config = {
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "zombie_sim",
+            "user": "postgres",
+            "password": "",
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "ensure_config_file"))
+            stack.enter_context(patch.object(main, "print_banner"))
+            stack.enter_context(
+                patch.object(main, "load_db_config", return_value=config)
+            )
+            stack.enter_context(patch.object(main, "try_bootstrap"))
+            stack.enter_context(patch("builtins.input", return_value="1"))
+            stack.enter_context(
+                patch.object(main, "handle_simulation", side_effect=EOFError)
+            )
+            exit_mock = stack.enter_context(patch.object(main, "handle_exit"))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertEqual(main.main([]), 0)
+
+        exit_mock.assert_called_once()
 
 
 class ResetOrderTests(unittest.TestCase):

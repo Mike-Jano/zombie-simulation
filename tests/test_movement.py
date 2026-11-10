@@ -56,6 +56,40 @@ def move(human: Human, zombie: Zombie):
     return SectorEngine._movement_phase(sector(), humans, zombies)
 
 
+class _AlwaysHit(random.Random):
+    """Hit roll succeeds; damage rolls still use the real generator."""
+
+    def random(self) -> float:
+        return 0.0
+
+
+class SimultaneousDamageTests(unittest.TestCase):
+    def test_both_sides_damage_each_other_in_the_same_tick(self):
+        # Neither side may die before swinging: the zombie is killed by the
+        # human's shot but must still land its own blow this tick.
+        human = make_human()
+        zombie = Zombie(
+            agent_id=2,
+            agent_type="zombie",
+            is_alive=True,
+            x_pos=1.0,
+            y_pos=0.0,
+            health=1,
+            speed=3,
+            strength=5,
+        )
+        events, attacks = SectorEngine._combat_phase(
+            sector(),
+            {human.agent_id: human},
+            {zombie.agent_id: zombie},
+            _AlwaysHit(0),
+        )
+        self.assertEqual(attacks, 2)
+        self.assertFalse(zombie.is_alive)
+        self.assertLess(human.health, 100)
+        self.assertEqual(len(events), 2)
+
+
 class HumanStandoffTests(unittest.TestCase):
     def test_hold_distance_is_weapon_range(self):
         for tier in (1, 3, 5):

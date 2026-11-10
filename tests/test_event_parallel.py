@@ -256,6 +256,7 @@ class FakeDB:
 
     def __init__(self, agents):
         self.config: dict = {}
+        self.map_bounds = None
         self.rows = {agent.agent_id: agent for agent in agents}
         self.fetch_calls = 0
 
@@ -401,6 +402,18 @@ class ReportCountTests(unittest.TestCase):
         self.assertEqual((report.humans_start, report.humans_end), (5, 5))
         self.assertEqual((report.zombies_start, report.zombies_end), (0, 0))
         self.assertIn("Humans : 5 -> 5 alive", report.render())
+
+
+class GeometryTests(unittest.TestCase):
+    def test_run_gives_the_database_the_same_map_bounds(self):
+        db = FakeDB(make_agents(5, 5, seed=1))
+        simulation = Simulation(
+            db, rng=random.Random(1), workers=1, backend="serial", seed=1
+        )
+        simulation.run()
+
+        self.assertIsNotNone(db.map_bounds)
+        self.assertEqual(db.map_bounds, simulation.map_bounds)
 
 
 class _RecordingVisualizer:

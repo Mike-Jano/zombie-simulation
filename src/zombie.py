@@ -23,6 +23,11 @@ class Zombie(Agent):
         """Fixed reach - zombies cannot attack from farther away."""
         return cfg.ZOMBIE_ATTACK_RANGE
 
+    @property
+    def hold_distance(self) -> float:
+        """How close a zombie closes before it stops."""
+        return cfg.ZOMBIE_STOP_DISTANCE
+
     def can_reach(self, distance: float) -> bool:
         return distance <= self.attack_range
 

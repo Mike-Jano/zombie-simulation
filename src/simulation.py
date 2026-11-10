@@ -420,6 +420,10 @@ class Simulation:
             self.map_bounds = map_bounds_for(agent_count)
         if self.max_sectors is None:
             self.max_sectors = max_sectors_for(agent_count)
+        # A caller that built the DBManager without bounds (status/reset) still
+        # gets the same clamping the simulation itself uses.
+        if hasattr(self.db, "map_bounds"):
+            self.db.map_bounds = self.map_bounds
 
     def prewarm(self, agent_count: int) -> None:
         """Start the workers early, while the caller is still busy.

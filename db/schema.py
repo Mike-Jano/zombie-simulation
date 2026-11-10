@@ -68,6 +68,14 @@ def _server_params(config: dict) -> dict:
 def ensure_database(config: dict) -> None:
     """Create the target database if it does not exist."""
     db_name = config["dbname"]
+    try:
+        # Fast path: the database already exists, so no maintenance connection
+        # (and no CREATE privilege) is needed.
+        psycopg.connect(**connect_params(config)).close()
+        return
+    except psycopg.OperationalError:
+        pass
+
     conn = psycopg.connect(**_server_params(config))
     conn.autocommit = True
     try:

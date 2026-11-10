@@ -118,39 +118,21 @@ def shard_parts(count: int, shards: int, chunk_size: int = 0) -> int:
 # --------------------------------------------------------------------------- #
 # Plan functions (safe to run on a worker thread)
 # --------------------------------------------------------------------------- #
-def _plan_human_moves(agents, index: SpatialIndex, bounds):
+def _plan_moves(agents, index: SpatialIndex, bounds):
     plans = []
-    for human in agents:
-        if not human.is_alive:
+    for agent in agents:
+        if not agent.is_alive:
             continue
-        target, distance = index.nearest(human.x_pos, human.y_pos)
+        target, distance = index.nearest(agent.x_pos, agent.y_pos)
         if target is None:
             continue
-        new_x, new_y, moved = human.planned_move(
+        new_x, new_y, moved = agent.planned_move(
             target.x_pos,
             target.y_pos,
-            stop_distance=min(human.hold_distance, distance),
+            stop_distance=min(agent.hold_distance, distance),
             bounds=bounds,
         )
-        plans.append(MovePlan(human.agent_id, new_x, new_y, moved, distance))
-    return plans
-
-
-def _plan_zombie_moves(agents, index: SpatialIndex, bounds):
-    plans = []
-    for zombie in agents:
-        if not zombie.is_alive:
-            continue
-        target, distance = index.nearest(zombie.x_pos, zombie.y_pos)
-        if target is None:
-            continue
-        new_x, new_y, moved = zombie.planned_move(
-            target.x_pos,
-            target.y_pos,
-            stop_distance=min(cfg.ZOMBIE_STOP_DISTANCE, distance),
-            bounds=bounds,
-        )
-        plans.append(MovePlan(zombie.agent_id, new_x, new_y, moved, distance))
+        plans.append(MovePlan(agent.agent_id, new_x, new_y, moved, distance))
     return plans
 
 
@@ -349,9 +331,7 @@ class SectorEngine:
 
             # Humans: read-only zombie positions from before this tick's moves.
             zombie_index = SpatialIndex(zombies_list, bounds=bounds)
-            human_planner = partial(
-                _plan_human_moves, index=zombie_index, bounds=bounds
-            )
+            human_planner = partial(_plan_moves, index=zombie_index, bounds=bounds)
             for plans in executor.map(
                 human_planner,
                 chunked(humans_list, shard_parts(len(humans_list), shards, chunk_size)),
@@ -366,9 +346,7 @@ class SectorEngine:
 
             # Zombies: humans have moved, so rebuild before planning their chase.
             human_index = SpatialIndex(humans_list, bounds=bounds)
-            zombie_planner = partial(
-                _plan_zombie_moves, index=human_index, bounds=bounds
-            )
+            zombie_planner = partial(_plan_moves, index=human_index, bounds=bounds)
             for plans in executor.map(
                 zombie_planner,
                 chunked(zombies_list, shard_parts(len(zombies_list), shards, chunk_size)),

@@ -87,7 +87,12 @@ def parse_worker_list(raw: str) -> list[int]:
         piece = piece.strip()
         if not piece:
             continue
-        values.append(int(piece))
+        try:
+            values.append(int(piece))
+        except ValueError:
+            raise ValueError(
+                f"--workers expects comma-separated whole numbers; got {piece!r}"
+            ) from None
     return values or [1]
 
 
@@ -143,6 +148,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args(argv)
+
+    try:
+        worker_budgets = parse_worker_list(args.workers)
+    except ValueError as exc:
+        print(exc)
+        return 1
 
     if args.population <= 0:
         print("Population must be a positive number of agents.")
@@ -216,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results = []
     measured_plans: set[tuple[int, int]] = set()
-    for requested_workers in parse_worker_list(args.workers):
+    for requested_workers in worker_budgets:
         if requested_workers <= 1:
             continue
         if args.backend and args.backend != "auto":
@@ -271,7 +282,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not results:
-        print("No pool could be started; this machine will run single-threaded.")
+        print(
+            "No pooled row was measured (single sector or pool unavailable); "
+            "this machine will run single-threaded."
+        )
         return 0
 
     serial_seconds = baseline[0]

@@ -96,13 +96,6 @@ class Agent:
             bool(self.is_super),
         )
 
-    def __str__(self) -> str:
-        state = "alive" if self.is_alive else "dead"
-        return (
-            f"{self.agent_type}#{self.agent_id} ({self.x_pos:.1f}, "
-            f"{self.y_pos:.1f}) hp={self.health} {state}"
-        )
-
 
 def min_max(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))

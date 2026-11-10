@@ -207,7 +207,8 @@ Whichever happens first:
 
 Every visit is capped at `SECTOR_REFRESH_TICKS` (15 by default), so no single
 sector can grind on. On top of that the whole run is bounded by `MAX_ROUNDS`
-(400) and `MAX_TOTAL_TICKS` (6000). A round in which nothing moved and nothing
+(400) and `MAX_TOTAL_TICKS` (derived as `MAX_ROUNDS * SECTOR_REFRESH_TICKS`,
+6000 by default). A round in which nothing moved and nothing
 fought does **not** end the run any more: the next round collapses to a single
 global sector, where the two sides are guaranteed to engage (`COLLAPSE_ON_
 STAGNATION`). Only a second stalled round after that stops the run.
@@ -434,6 +435,7 @@ Or run only the data-layer tests against a scratch PostgreSQL with:
 
 ```
 main.py                     menu, prompts, run orchestration
+.gitignore                  ignores venv, caches, output and database.ini
 config/
   database.ini              <-- PostgreSQL login: edit this file
   db_config.py              reads/writes database.ini, builds psycopg params
@@ -467,11 +469,12 @@ tests/
   test_parallel.py          sector policy, determinism, backend equivalence
   test_event_parallel.py    tick sharding, chunk size, frame interval, cache
   test_spatial.py           spatial index vs brute-force reference
-  test_movement.py          humans hold at weapon range, zombies keep closing
+  test_movement.py          humans hold at weapon range, simultaneous damage
   test_map_bounds.py        config/schema/spawner map bounds
   test_html_vis.py          frame cap, record budget, prune on finish
-  test_main.py              CLI population cap, exit codes, reset ordering
-  test_db_config.py         blank-password handling
+  test_main.py              CLI cap, exit codes, run/reset ordering, EOF exit
+  test_db_config.py         blank-password handling and INI warnings
+  test_schema.py            ensure_database fast path and CREATE fallback
   test_db_integration.py    opt-in real-PostgreSQL data-layer checks
 output/                     generated HTML runs (created on demand)
 ```
@@ -508,7 +511,7 @@ FRAME_INTERVAL = 2            # capture every Nth tick (1 = every tick)
 SECTOR_REFRESH_TICKS = 15     # re-cluster and rebuild sectors after this many ticks
 STALL_PATIENCE = 8            # stop a visit if the closest pair stops closing
 MAX_ROUNDS = 400
-MAX_TOTAL_TICKS = 6000        # world ticks, not summed across sectors
+MAX_TOTAL_TICKS = MAX_ROUNDS * SECTOR_REFRESH_TICKS  # 6000 by default
 MAX_ITERATIONS_PER_SECTOR = 2000
 NO_COMBAT_PATIENCE = 5
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import sys
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parent / "database.ini"
@@ -89,11 +90,22 @@ def _read_ini() -> dict:
     parser = configparser.ConfigParser(interpolation=None)
     try:
         parser.read(CONFIG_PATH, encoding="utf-8")
-    except (OSError, configparser.Error):
-        # A broken file must not stop the app from starting.
+    except (OSError, configparser.Error) as exc:
+        # A broken file must not stop the app from starting, but silently
+        # ignoring it makes a typo look like "wrong password".
+        print(
+            f"Warning: could not read {CONFIG_PATH} ({exc}); "
+            "using environment variables and defaults.",
+            file=sys.stderr,
+        )
         return {}
 
     if not parser.has_section(SECTION):
+        print(
+            f"Warning: {CONFIG_PATH} has no readable [{SECTION}] section; "
+            "using environment variables and defaults.",
+            file=sys.stderr,
+        )
         return {}
     return {key: value.strip() for key, value in parser.items(SECTION)}
 

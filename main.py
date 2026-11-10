@@ -495,6 +495,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             else:
                 print("Unknown option.")
+        except EOFError:
+            print()
+            handle_exit(config)
+            return 0
         except KeyboardInterrupt:
             print()
             print("Interrupted - clearing agents from the database.")

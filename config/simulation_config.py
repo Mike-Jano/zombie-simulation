@@ -93,7 +93,9 @@ SECTOR_REFRESH_TICKS = 15
 
 # Hard safety nets. A run can never exceed these, so it can never hang.
 MAX_ROUNDS = 400
-MAX_TOTAL_TICKS = 6000
+# Derived so raising MAX_ROUNDS also raises the tick budget. A round advances
+# world time by at most SECTOR_REFRESH_TICKS.
+MAX_TOTAL_TICKS = MAX_ROUNDS * SECTOR_REFRESH_TICKS
 
 # Absolute per-sector-visit cap (never exceeded even if SECTOR_REFRESH_TICKS is
 # raised above it).

@@ -37,19 +37,11 @@ def chunked(items, parts: int) -> list[list]:
 class SerialTickExecutor:
     """Run every chunk inline on the calling thread."""
 
-    active = False
-
     def map(self, fn, chunks):
         return [fn(chunk) for chunk in chunks]
 
     def close(self) -> None:
         return None
-
-    def __enter__(self) -> "SerialTickExecutor":
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        self.close()
 
 
 class ThreadTickExecutor:
@@ -81,12 +73,6 @@ class ThreadTickExecutor:
         pool, self._pool = self._pool, None
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
-
-    def __enter__(self) -> "ThreadTickExecutor":
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        self.close()
 
 
 def make_executor(shards: int):

@@ -393,6 +393,13 @@ class BenchToolTests(unittest.TestCase):
             code = bench_parallel.main(["--population", "10", "--split", "2"])
         self.assertEqual(code, 1)
 
+    def test_bad_worker_list_is_rejected(self):
+        from tools import bench_parallel
+
+        with redirect_stdout(io.StringIO()):
+            code = bench_parallel.main(["--workers", "1,eight"])
+        self.assertEqual(code, 1)
+
     def test_rows_use_the_same_budget_and_shards_as_a_real_run(self):
         from tools import bench_parallel
 
