@@ -60,6 +60,38 @@ class UnusableFileWarningTests(unittest.TestCase):
 
         self.assertIn("could not read", err.getvalue())
 
+    def test_malformed_file_warning_does_not_print_the_password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp) / "database.ini"
+            # The password sits above the missing section header, so it is the
+            # line configparser would quote in the exception message.
+            ini.write_text("password = hunter2\n[postgresql]\n", encoding="utf-8")
+            err = io.StringIO()
+            with patch.object(db_config, "CONFIG_PATH", ini), redirect_stderr(err):
+                self.assertEqual(db_config._read_ini(), {})
+
+        self.assertIn("MissingSectionHeaderError", err.getvalue())
+        self.assertNotIn("hunter2", err.getvalue())
+
+    def test_non_utf8_file_warns_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp) / "database.ini"
+            ini.write_bytes("[postgresql]\npassword = secret\n".encode("utf-16"))
+            err = io.StringIO()
+            with patch.object(db_config, "CONFIG_PATH", ini), redirect_stderr(err):
+                self.assertEqual(db_config._read_ini(), {})
+
+        self.assertIn("UnicodeDecodeError", err.getvalue())
+
+
+class Utf8BomTests(unittest.TestCase):
+    def test_bom_file_is_read_normally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp) / "database.ini"
+            ini.write_bytes(b"\xef\xbb\xbf[postgresql]\nhost = h\n")
+            with patch.object(db_config, "CONFIG_PATH", ini):
+                self.assertEqual(db_config._read_ini(), {"host": "h"})
+
 
 if __name__ == "__main__":
     unittest.main()

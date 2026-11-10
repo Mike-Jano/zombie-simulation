@@ -93,9 +93,16 @@ SECTOR_REFRESH_TICKS = 15
 
 # Hard safety nets. A run can never exceed these, so it can never hang.
 MAX_ROUNDS = 400
+
+
 # Derived so raising MAX_ROUNDS also raises the tick budget. A round advances
 # world time by at most SECTOR_REFRESH_TICKS.
-MAX_TOTAL_TICKS = MAX_ROUNDS * SECTOR_REFRESH_TICKS
+def _tick_budget(refresh_ticks: int) -> int:
+    """Whole-run tick cap; a zero refresh still advances one tick per round."""
+    return MAX_ROUNDS * max(1, refresh_ticks)
+
+
+MAX_TOTAL_TICKS = _tick_budget(SECTOR_REFRESH_TICKS)
 
 # Absolute per-sector-visit cap (never exceeded even if SECTOR_REFRESH_TICKS is
 # raised above it).

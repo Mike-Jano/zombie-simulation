@@ -371,6 +371,14 @@ class WorkerCapTests(unittest.TestCase):
         self.assertLessEqual(resolve_workers(100_000), cfg.MAX_WORKERS)
 
 
+class TickBudgetTests(unittest.TestCase):
+    def test_zero_refresh_ticks_still_gives_one_tick_per_round(self):
+        self.assertEqual(cfg._tick_budget(0), cfg.MAX_ROUNDS)
+        self.assertEqual(
+            cfg._tick_budget(cfg.SECTOR_REFRESH_TICKS), cfg.MAX_TOTAL_TICKS
+        )
+
+
 class BenchToolTests(unittest.TestCase):
     def test_population_above_the_limit_is_rejected(self):
         from tools import bench_parallel

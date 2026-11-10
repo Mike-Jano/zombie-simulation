@@ -89,12 +89,17 @@ def _read_ini() -> dict:
 
     parser = configparser.ConfigParser(interpolation=None)
     try:
-        parser.read(CONFIG_PATH, encoding="utf-8")
-    except (OSError, configparser.Error) as exc:
+        parser.read(CONFIG_PATH, encoding="utf-8-sig")
+    except (configparser.Error, UnicodeError) as exc:
         # A broken file must not stop the app from starting, but silently
-        # ignoring it makes a typo look like "wrong password".
+        # ignoring it makes a typo look like "wrong password". Do not print
+        # {exc}: configparser quotes the offending file line, which may hold
+        # the password.
+        detail = type(exc).__name__
+        if getattr(exc, "lineno", None):
+            detail += f" at line {exc.lineno}"
         print(
-            f"Warning: could not read {CONFIG_PATH} ({exc}); "
+            f"Warning: could not read {CONFIG_PATH} ({detail}); "
             "using environment variables and defaults.",
             file=sys.stderr,
         )
