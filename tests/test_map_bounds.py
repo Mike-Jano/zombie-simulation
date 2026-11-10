@@ -69,8 +69,8 @@ class SchemaBoundsTests(unittest.TestCase):
         self.assertNotIn("agents_y_pos_bounds", schema.AGENTS_DDL)
         self.assertNotIn("BETWEEN", schema.AGENTS_DDL)
 
-    def test_map_bound_migration_helper_exists(self):
-        self.assertTrue(callable(getattr(schema, "_drop_map_bound_checks", None)))
+    def test_stale_check_migration_helper_exists(self):
+        self.assertTrue(callable(getattr(schema, "_drop_stale_checks", None)))
 
 
 class ClampTests(unittest.TestCase):

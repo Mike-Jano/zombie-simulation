@@ -41,7 +41,7 @@ HUMANS_DDL = """
 CREATE TABLE IF NOT EXISTS humans (
     agent_id    INTEGER NOT NULL,
     agent_type  TEXT NOT NULL DEFAULT 'human' CHECK (agent_type = 'human'),
-    weapon_tier INTEGER NOT NULL CHECK (weapon_tier BETWEEN 1 AND 5),
+    weapon_tier INTEGER NOT NULL CHECK (weapon_tier >= 1),
     PRIMARY KEY (agent_id, agent_type),
     FOREIGN KEY (agent_id, agent_type)
         REFERENCES agents (agent_id, agent_type) ON DELETE CASCADE
@@ -52,7 +52,7 @@ ZOMBIES_DDL = """
 CREATE TABLE IF NOT EXISTS zombies (
     agent_id   INTEGER NOT NULL,
     agent_type TEXT NOT NULL DEFAULT 'zombie' CHECK (agent_type = 'zombie'),
-    strength   INTEGER NOT NULL CHECK (strength BETWEEN 1 AND 5),
+    strength   INTEGER NOT NULL CHECK (strength >= 1),
     PRIMARY KEY (agent_id, agent_type),
     FOREIGN KEY (agent_id, agent_type)
         REFERENCES agents (agent_id, agent_type) ON DELETE CASCADE
@@ -88,26 +88,31 @@ def ensure_database(config: dict) -> None:
         conn.close()
 
 
-def _drop_map_bound_checks(cur) -> None:
-    """Drop position CHECKs left by builds that had a fixed-size map.
+def _drop_stale_checks(cur) -> None:
+    """Drop fixed-range CHECKs left by builds from before per-run values.
 
-    The map is now sized per run, so no single static CHECK can be correct.
-    Dropping a constraint leaves every agent row untouched.
+    Map bounds vary per run, and super agents exceed the normal stat spread, so
+    no static range can be correct. Bounded stat checks (`>= 1 AND <= 5`) and
+    the fixed position checks are dropped; the current open-ended ones survive.
     """
     cur.execute(
         """
-        SELECT conname
+        SELECT conrelid::regclass::text, conname
           FROM pg_constraint
-         WHERE conrelid = 'agents'::regclass
-           AND contype = 'c'
-           AND (pg_get_constraintdef(oid) ~ '\\mx_pos\\M'
-                OR pg_get_constraintdef(oid) ~ '\\my_pos\\M')
+         WHERE contype = 'c'
+           AND ((conrelid = 'agents'::regclass
+                 AND (pg_get_constraintdef(oid) ~ '\\mx_pos\\M'
+                      OR pg_get_constraintdef(oid) ~ '\\my_pos\\M'))
+             OR (conrelid IN ('humans'::regclass, 'zombies'::regclass)
+                 AND pg_get_constraintdef(oid)
+                     ~ '\\m(weapon_tier|strength)\\M'
+                 AND pg_get_constraintdef(oid) LIKE '%<=%'))
         """
     )
-    for (name,) in cur.fetchall():
+    for table, name in cur.fetchall():
         cur.execute(
-            sql.SQL("ALTER TABLE agents DROP CONSTRAINT IF EXISTS {}").format(
-                sql.Identifier(name)
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}").format(
+                sql.Identifier(table), sql.Identifier(name)
             )
         )
 
@@ -125,7 +130,7 @@ def create_tables(config: dict) -> None:
                     # Concurrent CREATE ... IF NOT EXISTS can lose the race in
                     # the catalog. The object exists, so continue.
                     pass
-            _drop_map_bound_checks(cur)
+            _drop_stale_checks(cur)
     finally:
         conn.close()
 

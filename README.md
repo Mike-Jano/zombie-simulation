@@ -184,6 +184,13 @@ strength 3, 50 at strength 5), so a human that lets it close usually dies in
 about five bites. Humans still out-range zombies — they get free shots while
 the horde walks in — but they can no longer mow it down before it arrives.
 
+Rare **super agents** (default `0.00002` per spawned agent, either side) get
+double the spawn-max tier/strength (10) and triple the spawn-max health (450
+for a human, 600 for a zombie), with speed fixed at 3. They use the same combat
+formulas, so a super human hits for 30–90 at 40 units. The DB has no super
+column: a stat above the normal spawn range is the marker, and the HTML player
+draws a yellow ring around them.
+
 ### End of a sector visit
 
 Whichever happens first:
@@ -522,12 +529,17 @@ ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
 ZOMBIE_STRENGTH_RANGE = (2, 5)
 
+SUPER_AGENT_CHANCE = 0.00002  # per spawned agent, either side
+SUPER_STAT_MULTIPLIER = 2     # tier / strength above the spawn max
+SUPER_HEALTH_MULTIPLIER = 3   # health above the spawn max
+SUPER_SPEED = 3               # fixed, not doubled
+
 MAX_AGENTS = 100000           # hard cap on one run's population
 MAX_FRAMES = 2000
 ```
 
-Note: only `HUMAN_WEAPON_TIER_RANGE` and `ZOMBIE_STRENGTH_RANGE` are clamped by
-`CHECK` constraints in the schema (tiers and strengths must stay within 1–5).
+Note: `weapon_tier` and `strength` only have a `>= 1` schema check now; the
+ranges above shape normal spawns, and super agents deliberately exceed them.
 The health and speed ranges only shape new spawns.
 
 ### Map size
@@ -548,8 +560,10 @@ grid step, so it cannot drift out of sync.
 
 Older databases may still carry the fixed `-1000…1000` `CHECK` constraints.
 Bootstrap drops those constraints (leaving every agent row untouched) because a
-static boundary cannot describe a per-run map. Bounds are enforced while
-spawning, saving and moving agents.
+static boundary cannot describe a per-run map. The same cleanup drops the old
+bounded `1–5` stat checks, so super agents (tier/strength 10) insert into an
+existing database without a reset. Bounds are enforced while spawning, saving
+and moving agents.
 
 ### Command line
 

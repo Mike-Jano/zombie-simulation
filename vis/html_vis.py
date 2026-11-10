@@ -77,6 +77,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .dot.human { background: var(--human); box-shadow: 0 0 0 3px var(--human-soft); }
   .dot.zombie { background: var(--zombie); box-shadow: 0 0 0 3px var(--zombie-soft); }
+  .dot.super { background: transparent; border: 2px solid var(--accent); }
   .dot.sector { background: var(--accent); border-radius: 2px; }
   .dot.ghost { background: linear-gradient(90deg, var(--human) 0 50%, var(--zombie) 50% 100%);
                opacity: .45; }
@@ -142,14 +143,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="legend">
       <span><span class="dot human"></span>Human</span>
       <span><span class="dot zombie"></span>Zombie</span>
+      <span><span class="dot super"></span>Super (yellow ring)</span>
       <span><span class="dot sector"></span>Active sector</span>
       <span><span class="dot ghost"></span>Recently seen (faded)</span>
     </div>
     <p class="tips">
       Blue dots are humans, green dots are zombies; zombies carry an inner ring.
-      Health bars appear once an agent is damaged. Agents only interact inside the
-      active sector (amber). Faint outlines show every sector in the current round,
-      and faded dots are agents last seen in previous sectors.
+      Rare super agents keep their side colour inside a yellow ring and are far
+      tougher. Health bars appear once an agent is damaged. Agents only interact
+      inside the active sector (amber). Faint outlines show every sector in the
+      current round, and faded dots are agents last seen in previous sectors.
     </p>
   </div>
 </section>
@@ -183,6 +186,8 @@ const FADE_IN_MS = 160;
 // Health bars use the real spawn maxima from the run's config.
 if (RUNINFO.human_max_hp) AGENT_STYLE.human.maxHp = RUNINFO.human_max_hp;
 if (RUNINFO.zombie_max_hp) AGENT_STYLE.zombie.maxHp = RUNINFO.zombie_max_hp;
+if (RUNINFO.human_super_max_hp) AGENT_STYLE.human.superMaxHp = RUNINFO.human_super_max_hp;
+if (RUNINFO.zombie_super_max_hp) AGENT_STYLE.zombie.superMaxHp = RUNINFO.zombie_super_max_hp;
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 const W = canvas.width, H = canvas.height, PAD = 40;
@@ -313,7 +318,7 @@ function roundRect(x, y, w, h, radius) {
 }
 
 function drawAgent(agent, alpha) {
-  const [, type, x, y, hp] = agent;
+  const [, type, x, y, hp, , isSuper] = agent;
   const px = sx(x), py = sy(y);
   const style = type === "human" ? AGENT_STYLE.human : AGENT_STYLE.zombie;
   ctx.globalAlpha = alpha;
@@ -349,8 +354,18 @@ function drawAgent(agent, alpha) {
   ctx.fillStyle = "rgba(255,255,255,0.6)";
   ctx.fill();
 
+  // Super agents keep their side colour inside a yellow ring.
+  if (isSuper) {
+    ctx.beginPath();
+    ctx.arc(px, py, style.radius + 2.6, 0, Math.PI * 2);
+    ctx.strokeStyle = "#ffd54f";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+
   // Health bar only once damaged: a bar over every agent is most of the noise.
-  const fraction = Math.max(0, Math.min(1, hp / style.maxHp));
+  const maxHp = isSuper ? (style.superMaxHp || style.maxHp) : style.maxHp;
+  const fraction = Math.max(0, Math.min(1, hp / maxHp));
   if (fraction < 1) {
     const barW = 10, barH = 2.5;
     const barX = px - barW / 2;
@@ -632,6 +647,12 @@ class HtmlVisualizer:
             "grid_step": _grid_step(int(max_x - min_x)),
             "human_max_hp": cfg.HUMAN_HEALTH_RANGE[1],
             "zombie_max_hp": cfg.ZOMBIE_HEALTH_RANGE[1],
+            "human_super_max_hp": (
+                cfg.HUMAN_HEALTH_RANGE[1] * cfg.SUPER_HEALTH_MULTIPLIER
+            ),
+            "zombie_super_max_hp": (
+                cfg.ZOMBIE_HEALTH_RANGE[1] * cfg.SUPER_HEALTH_MULTIPLIER
+            ),
             "parallel": self.info,
         }
         html = (

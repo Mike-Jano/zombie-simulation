@@ -136,6 +136,15 @@ ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
 ZOMBIE_STRENGTH_RANGE = (2, 5)
 
+# Super agents: rare individuals of either side whose weapon tier / strength is
+# double the spawn maximum and whose health is triple it. Speed is fixed rather
+# than doubled. The chance is rolled once per spawned agent, so it is also the
+# knob to raise temporarily to see one in a small run.
+SUPER_AGENT_CHANCE = 0.00002
+SUPER_STAT_MULTIPLIER = 2
+SUPER_HEALTH_MULTIPLIER = 3
+SUPER_SPEED = 3
+
 # Hard cap on one run's population. The spawn list is built in memory before
 # any database write, so a typo must not be able to exhaust the machine.
 MAX_AGENTS = 100_000

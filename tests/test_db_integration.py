@@ -179,6 +179,57 @@ class DatabaseIntegrationTests(unittest.TestCase):
                 cur.execute("SELECT count(*) FROM agents")
                 self.assertEqual(cur.fetchone()[0], 2)
 
+    def test_bootstrap_drops_stale_stat_ranges_so_supers_insert(self):
+        self._insert(1, 1)
+        with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE humans ADD CONSTRAINT humans_old_tier_check "
+                    "CHECK (weapon_tier BETWEEN 1 AND 5)"
+                )
+                cur.execute(
+                    "ALTER TABLE zombies ADD CONSTRAINT zombies_old_strength_check "
+                    "CHECK (strength BETWEEN 1 AND 5)"
+                )
+
+        self.assertIsNone(schema.bootstrap(TEST_CONFIG))
+
+        with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conrelid IN ('humans'::regclass, 'zombies'::regclass) "
+                    "AND contype = 'c' "
+                    "AND (pg_get_constraintdef(oid) ~ 'weapon_tier' "
+                    "     OR pg_get_constraintdef(oid) ~ 'strength') "
+                    "AND pg_get_constraintdef(oid) LIKE '%<=%'"
+                )
+                self.assertEqual(cur.fetchone()[0], 0)
+
+        # The old 1..5 checks would reject these; the super spread must insert.
+        with DBManager(TEST_CONFIG) as db:
+            db.insert_agents(
+                [
+                    {
+                        "agent_type": "human",
+                        "x_pos": 0,
+                        "y_pos": 0,
+                        "health": 450,
+                        "speed": 3,
+                        "weapon_tier": 10,
+                    },
+                    {
+                        "agent_type": "zombie",
+                        "x_pos": 1,
+                        "y_pos": 1,
+                        "health": 600,
+                        "speed": 3,
+                        "strength": 10,
+                    },
+                ]
+            )
+
     def test_bootstrap_recreates_a_missing_subtable(self):
         with psycopg.connect(**connect_params(TEST_CONFIG)) as conn:
             conn.autocommit = True

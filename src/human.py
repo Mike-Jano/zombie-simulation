@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from config import simulation_config as cfg
 from src.agent import Agent
 from utils import combat
 
@@ -33,6 +34,11 @@ class Human(Agent):
 
     def can_reach(self, distance: float) -> bool:
         return distance <= self.max_range
+
+    @property
+    def is_super(self) -> bool:
+        # No DB flag: a tier above the spawn maximum is what marks a super.
+        return self.weapon_tier > cfg.HUMAN_WEAPON_TIER_RANGE[1]
 
     def hit_chance(self, distance: float) -> float:
         return combat.human_hit_chance(self.weapon_tier, distance)

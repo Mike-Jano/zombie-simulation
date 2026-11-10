@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from config.simulation_config import ZOMBIE_ATTACK_RANGE
+from config import simulation_config as cfg
 from src.agent import Agent
 from utils import combat
 
@@ -21,10 +21,15 @@ class Zombie(Agent):
     @property
     def attack_range(self) -> float:
         """Fixed reach - zombies cannot attack from farther away."""
-        return ZOMBIE_ATTACK_RANGE
+        return cfg.ZOMBIE_ATTACK_RANGE
 
     def can_reach(self, distance: float) -> bool:
         return distance <= self.attack_range
+
+    @property
+    def is_super(self) -> bool:
+        # No DB flag: a strength above the spawn maximum is what marks a super.
+        return self.strength > cfg.ZOMBIE_STRENGTH_RANGE[1]
 
     def roll_damage(self, rng: random.Random) -> int:
         return combat.zombie_damage(self.strength, rng)

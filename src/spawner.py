@@ -18,6 +18,27 @@ def _random_position(rng: random.Random, bounds: Bounds) -> tuple[int, int]:
     )
 
 
+def _random_stats(
+    rng: random.Random,
+    health_range: tuple[int, int],
+    speed_range: tuple[int, int],
+    stat_range: tuple[int, int],
+) -> tuple[int, int, int]:
+    """Roll ``(health, speed, stat)``; rare agents get the super spread.
+
+    Every agent draws the same four values, so whether an agent turns out to be
+    super never shifts the stream for the agents spawned after it.
+    """
+    health = rng.randint(*health_range)
+    speed = rng.randint(*speed_range)
+    stat = rng.randint(*stat_range)
+    if rng.random() < cfg.SUPER_AGENT_CHANCE:
+        health = health_range[1] * cfg.SUPER_HEALTH_MULTIPLIER
+        speed = cfg.SUPER_SPEED
+        stat = stat_range[1] * cfg.SUPER_STAT_MULTIPLIER
+    return health, speed, stat
+
+
 def generate_spawns(
     humans: int,
     zombies: int,
@@ -32,27 +53,39 @@ def generate_spawns(
     specs: list[dict] = []
     for _ in range(max(0, humans)):
         x, y = _random_position(rng, map_bounds)
+        health, speed, weapon_tier = _random_stats(
+            rng,
+            cfg.HUMAN_HEALTH_RANGE,
+            cfg.HUMAN_SPEED_RANGE,
+            cfg.HUMAN_WEAPON_TIER_RANGE,
+        )
         specs.append(
             {
                 "agent_type": "human",
                 "x_pos": x,
                 "y_pos": y,
-                "health": rng.randint(*cfg.HUMAN_HEALTH_RANGE),
-                "speed": rng.randint(*cfg.HUMAN_SPEED_RANGE),
-                "weapon_tier": rng.randint(*cfg.HUMAN_WEAPON_TIER_RANGE),
+                "health": health,
+                "speed": speed,
+                "weapon_tier": weapon_tier,
             }
         )
 
     for _ in range(max(0, zombies)):
         x, y = _random_position(rng, map_bounds)
+        health, speed, strength = _random_stats(
+            rng,
+            cfg.ZOMBIE_HEALTH_RANGE,
+            cfg.ZOMBIE_SPEED_RANGE,
+            cfg.ZOMBIE_STRENGTH_RANGE,
+        )
         specs.append(
             {
                 "agent_type": "zombie",
                 "x_pos": x,
                 "y_pos": y,
-                "health": rng.randint(*cfg.ZOMBIE_HEALTH_RANGE),
-                "speed": rng.randint(*cfg.ZOMBIE_SPEED_RANGE),
-                "strength": rng.randint(*cfg.ZOMBIE_STRENGTH_RANGE),
+                "health": health,
+                "speed": speed,
+                "strength": strength,
             }
         )
 

@@ -79,8 +79,13 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Reporting
     # ------------------------------------------------------------------ #
+    @property
+    def is_super(self) -> bool:
+        """Rare over-max agent; subclasses check their own stat against spawn max."""
+        return False
+
     def snapshot(self) -> tuple:
-        """Compact tuple consumed by the visualisers."""
+        """Compact tuple consumed by the visualisers (last item is the super flag)."""
         return (
             self.agent_id,
             self.agent_type,
@@ -88,6 +93,7 @@ class Agent:
             round(self.y_pos, 1),
             int(self.health),
             bool(self.is_alive),
+            bool(self.is_super),
         )
 
     def __str__(self) -> str:
