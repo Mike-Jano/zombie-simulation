@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 from config import simulation_config as cfg  # noqa: E402
 from runtime.capabilities import resolve_plan, resolve_workers  # noqa: E402
 from runtime.sector_pool import SectorPool  # noqa: E402
-from src.sector_engine import derive_seed  # noqa: E402
+from src.sector_engine import SectorEngine, derive_seed  # noqa: E402
 from src.sector_task import build_sector_tasks, simulate_sector_task  # noqa: E402
 from src.simulation import Simulation  # noqa: E402
 from src.spawner import build_agents  # noqa: E402
@@ -377,6 +377,16 @@ class TickBudgetTests(unittest.TestCase):
         self.assertEqual(
             cfg._tick_budget(cfg.SECTOR_REFRESH_TICKS), cfg.MAX_TOTAL_TICKS
         )
+
+    def test_tick_budget_uses_the_hard_per_visit_cap(self):
+        self.assertEqual(
+            cfg._tick_budget(cfg.MAX_ITERATIONS_PER_SECTOR + 1),
+            cfg.MAX_ROUNDS * cfg.MAX_ITERATIONS_PER_SECTOR,
+        )
+
+    def test_zero_refresh_ticks_still_runs_one_engine_tick(self):
+        with patch.object(cfg, "SECTOR_REFRESH_TICKS", 0):
+            self.assertEqual(SectorEngine().max_ticks, 1)
 
 
 class BenchToolTests(unittest.TestCase):

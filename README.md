@@ -205,10 +205,12 @@ Whichever happens first:
 
 ### Why the run cannot freeze
 
-Every visit is capped at `SECTOR_REFRESH_TICKS` (15 by default), so no single
-sector can grind on. On top of that the whole run is bounded by `MAX_ROUNDS`
+Every visit is capped at `min(SECTOR_REFRESH_TICKS,
+MAX_ITERATIONS_PER_SECTOR)` (15 ticks by default), so no single sector can
+grind on. On top of that the whole run is bounded by `MAX_ROUNDS`
 (400) and `MAX_TOTAL_TICKS` (derived as
-`MAX_ROUNDS * max(1, SECTOR_REFRESH_TICKS)`, 6000 by default). A round in which
+`MAX_ROUNDS * max(1, min(SECTOR_REFRESH_TICKS, MAX_ITERATIONS_PER_SECTOR))`,
+6000 by default). A round in which
 nothing moved and nothing fought does **not** end the run any more: the next
 round collapses to a single
 global sector, where the two sides are guaranteed to engage (`COLLAPSE_ON_
@@ -513,8 +515,8 @@ FRAME_INTERVAL = 2            # capture every Nth tick (1 = every tick)
 SECTOR_REFRESH_TICKS = 15     # re-cluster and rebuild sectors after this many ticks
 STALL_PATIENCE = 8            # stop a visit if the closest pair stops closing
 MAX_ROUNDS = 400
-MAX_TOTAL_TICKS = MAX_ROUNDS * max(1, SECTOR_REFRESH_TICKS)  # 6000 by default
 MAX_ITERATIONS_PER_SECTOR = 2000
+MAX_TOTAL_TICKS = MAX_ROUNDS * max(1, min(SECTOR_REFRESH_TICKS, MAX_ITERATIONS_PER_SECTOR))  # 6000 by default
 NO_COMBAT_PATIENCE = 5
 
 ZOMBIE_ATTACK_RANGE = 2.5
