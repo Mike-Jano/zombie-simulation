@@ -149,7 +149,7 @@ ZOMBIE_DAMAGE_PER_STRENGTH = (5, 15)  # randint(strength*5, strength*15)
 # Humans: reach scales with weapon tier, damage is random per tier and shots
 # can miss - the farther away the target, the lower the hit chance. A human
 # walks until the target is inside its range and then holds there, firing.
-HUMAN_RANGE_PER_TIER = 4          # tier 4 -> 12 units
+HUMAN_RANGE_PER_TIER = 2.5          # tier 6 -> 15 units
 HUMAN_DAMAGE_PER_TIER = (3, 9)       # randint(tier*3, tier*9)
 HUMAN_HIT_BASE = 0.9                # point-blank accuracy
 HUMAN_HIT_FALLOFF = 0.045            # accuracy lost per unit per tier
@@ -160,7 +160,7 @@ HUMAN_HIT_FLOOR = 0.05
 # --------------------------------------------------------------------------- #
 HUMAN_HEALTH_RANGE = (80, 150)
 HUMAN_SPEED_RANGE = (1, 6)
-HUMAN_WEAPON_TIER_RANGE = (1, 5)
+HUMAN_WEAPON_TIER_RANGE = (1, 6)
 
 ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
