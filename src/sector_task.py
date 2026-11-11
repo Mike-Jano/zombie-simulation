@@ -20,6 +20,7 @@ import threading
 from dataclasses import dataclass, field
 
 from db.db_manager import DBManager
+from runtime import accelerator as accel_mod
 from src.agent import Agent
 from src.sector_engine import SectorEngine, SectorOutcome, derive_seed
 from utils.sectoring import Sector, build_sectors
@@ -36,6 +37,9 @@ class SectorTask:
     event_shards: int = 1
     db_config: dict | None = None
     map_bounds: tuple[float, float, float, float] | None = None
+    # "python" | "numpy" | "gpu".  Workers are spawned, not forked, so the
+    # orchestrator's choice has to travel with the task.
+    accel: str = ""
     humans: list[Agent] | None = field(default=None, repr=False)
     zombies: list[Agent] | None = field(default=None, repr=False)
 
@@ -112,6 +116,7 @@ def build_sector_tasks(
     capture_frames: bool = False,
     event_shards: int = 1,
     map_bounds: tuple[float, float, float, float] | None = None,
+    accel: str = "",
 ) -> list[SectorTask]:
     """Turn agents into memory-mode sector tasks (tests and benchmarks)."""
     positions = {
@@ -124,7 +129,9 @@ def build_sector_tasks(
     by_id = {agent.agent_id: agent for agent in agents}
     tasks = []
     for sector in sectors:
-        members = [by_id[agent_id] for agent_id in sector.agent_ids]
+        # Sorted ids are the canonical order the engine and every backend
+        # assume; mono-type merging can leave ``sector.agent_ids`` unsorted.
+        members = [by_id[agent_id] for agent_id in sorted(sector.agent_ids)]
         tasks.append(
             SectorTask(
                 sector=sector,
@@ -133,6 +140,7 @@ def build_sector_tasks(
                 sectors_in_round=len(sectors),
                 capture_frames=capture_frames,
                 event_shards=event_shards,
+                accel=accel,
                 humans=[a for a in members if a.agent_type == "human"],
                 zombies=[a for a in members if a.agent_type == "zombie"],
             )
@@ -140,11 +148,26 @@ def build_sector_tasks(
     return tasks
 
 
+def _accelerator(mode: str):
+    """The process-wide accelerator for this task, or None for the scalar path."""
+    if not mode or mode == "python":
+        return None
+    if accel_mod.requested() != mode:
+        accel_mod.configure(mode)
+    backend = accel_mod.get()
+    # A machine without numpy/wgpu resolves to the pure-Python stand-in, which
+    # is slower than the engine's own grid.  Use the grid instead.
+    if getattr(backend, "name", "") == "python":
+        return None
+    return backend
+
+
 def simulate_sector_task(task: SectorTask) -> SectorOutcome:
     engine = SectorEngine(
         max_ticks=task.max_ticks,
         capture_frames=task.capture_frames,
         event_shards=task.event_shards,
+        accel=_accelerator(task.accel),
     )
     rng = random.Random(task.seed)
 

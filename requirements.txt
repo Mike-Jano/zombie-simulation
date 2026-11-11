@@ -1,1 +1,5 @@
 psycopg[binary]>=3.1,<4
+# Nearest-enemy acceleration.  Both are optional at runtime: the engine falls
+# back to the pure-Python scalar loop when they are missing.
+numpy>=1.24
+wgpu>=0.33,<0.34

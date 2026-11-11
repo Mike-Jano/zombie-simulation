@@ -10,8 +10,14 @@ The sector count comes from the population, so it caps the outer pool:
 backend the rest of the ``--workers`` budget becomes per-sector shards, and the
 benchmark resolves both from the same helpers as a real run.
 
+``--accel`` picks the nearest-enemy backend for the whole measurement, so the
+same population can be compared across ``python``, ``numpy`` and ``gpu``. A GPU
+run is never pooled here: one device, one process, exactly like a real run.
+
     python tools/bench_parallel.py
     python tools/bench_parallel.py --population 4000 --workers 1,2,4,8,12
+    python tools/bench_parallel.py --accel numpy
+    python tools/bench_parallel.py --accel gpu --population 3000
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import simulation_config as cfg  # noqa: E402
+from runtime import accelerator as accel_mod  # noqa: E402
 from runtime.capabilities import (  # noqa: E402
     resolve_event_shards,
     resolve_plan,
@@ -146,6 +153,15 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="per-sector tick shards for the pooled rows (0 = auto)",
     )
+    parser.add_argument(
+        "--accel",
+        choices=("auto", "off", "numpy", "gpu"),
+        default=None,
+        help=(
+            "nearest-enemy backend for every row (default: the configured "
+            "auto choice)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args(argv)
 
@@ -175,8 +191,17 @@ def main(argv: list[str] | None = None) -> int:
     agents = build_agents(humans, zombies, random.Random(args.seed))
 
     plan = resolve_plan()
+    accel_plan = accel_mod.configure(args.accel)
+    if accel_plan.calibrate:
+        # Resolve auto/GPU now so the table measures what a run would use.
+        accel_mod.get()
+    accel_mode = accel_mod.mode()
     print()
     print(f"Plan      : {plan.describe()}")
+    print(
+        f"Accel     : "
+        f"{accel_mod.AccelPlan(accel_mode, accel_plan.detail).describe()}"
+    )
     print(f"Population: {humans} humans / {zombies} zombies ({len(agents)} total)")
     print(f"Tick cap  : runs are bounded by MAX_TOTAL_TICKS={cfg.MAX_TOTAL_TICKS}")
 
@@ -189,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     build_sectors(positions, target_k=count, types=types)
     cluster_ms = (time.perf_counter() - started) * 1000
 
-    pristine = build_sector_tasks(agents, args.seed, count)
+    pristine = build_sector_tasks(agents, args.seed, count, accel=accel_mode)
     sector_count = len(pristine)
     sizes = [len(t.humans or []) + len(t.zombies or []) for t in pristine]
     print(
@@ -224,6 +249,19 @@ def main(argv: list[str] | None = None) -> int:
         f"{elapsed:>8.2f} {ticks / elapsed:>9.1f} {1.0:>7.2f}x "
         f"{1.0:>9.0%} {'-':>8}"
     )
+
+    if accel_mode == "gpu":
+        print()
+        print(
+            "Note: a GPU run is single-threaded (one device, one process), so "
+            "there are no pool rows to measure."
+        )
+        projected = cfg.MAX_TOTAL_TICKS / (ticks / elapsed)
+        print(
+            f"Projected full run ({cfg.MAX_TOTAL_TICKS} world ticks): "
+            f"~{projected:.1f}s of sector work"
+        )
+        return 0
 
     results = []
     measured_plans: set[tuple[int, int]] = set()

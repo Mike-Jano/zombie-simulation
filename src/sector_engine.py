@@ -149,6 +149,68 @@ def _plan_attacks(agents, index: SpatialIndex):
 
 
 # --------------------------------------------------------------------------- #
+# Plan functions for an accelerator (numpy / GPU)
+# --------------------------------------------------------------------------- #
+# These produce the same objects as the scalar planners above, in the same
+# order, so the merge loops below cannot tell which backend answered.  Only the
+# nearest-target lookup is batched; movement arithmetic and RNG stay untouched.
+def _plan_moves_accel(agents, targets, bounds, accel):
+    movers = [agent for agent in agents if agent.is_alive]
+    living = [agent for agent in targets if agent.is_alive]
+    if not movers or not living:
+        return []
+
+    indices, distances = accel.nearest_cross(
+        [(agent.x_pos, agent.y_pos) for agent in movers],
+        [(agent.x_pos, agent.y_pos) for agent in living],
+    )
+    plans = []
+    for agent, index, distance in zip(movers, indices, distances):
+        if index < 0:
+            continue
+        target = living[index]
+        new_x, new_y, moved = agent.planned_move(
+            target.x_pos,
+            target.y_pos,
+            stop_distance=min(agent.hold_distance, distance),
+            bounds=bounds,
+        )
+        plans.append(MovePlan(agent.agent_id, new_x, new_y, moved, distance))
+    return plans
+
+
+def _plan_attacks_accel(agents, targets, accel):
+    attackers = [agent for agent in agents if agent.is_alive]
+    living = [agent for agent in targets if agent.is_alive]
+    if not attackers or not living:
+        return []
+
+    indices, distances = accel.nearest_cross(
+        [(agent.x_pos, agent.y_pos) for agent in attackers],
+        [(agent.x_pos, agent.y_pos) for agent in living],
+    )
+    return [
+        AttackPlan(agent.agent_id, living[index].agent_id, distance)
+        for agent, index, distance in zip(attackers, indices, distances)
+        if index >= 0
+    ]
+
+
+def _apply_moves(agents, plans):
+    """Apply planned positions in plan order, returning distance and gap."""
+    moved_total = 0.0
+    closest_gap = float("inf")
+    for plan in plans:
+        agent = agents[plan.agent_id]
+        agent.x_pos = plan.new_x
+        agent.y_pos = plan.new_y
+        moved_total += plan.moved
+        if plan.gap < closest_gap:
+            closest_gap = plan.gap
+    return moved_total, closest_gap
+
+
+# --------------------------------------------------------------------------- #
 # Engine
 # --------------------------------------------------------------------------- #
 class SectorEngine:
@@ -159,6 +221,7 @@ class SectorEngine:
         event_shards: int = 1,
         chunk_size: int | None = None,
         frame_interval: int | None = None,
+        accel=None,
     ):
         if max_ticks is None:
             max_ticks = max(
@@ -172,6 +235,9 @@ class SectorEngine:
         self.chunk_size = max(0, int(raw_chunk or 0))
         raw_interval = cfg.FRAME_INTERVAL if frame_interval is None else frame_interval
         self.frame_interval = max(1, int(raw_interval or 1))
+        # ``None`` keeps the reference scalar path; numpy/GPU objects come from
+        # runtime.accelerator and only change how the nearest enemy is found.
+        self.accel = accel
 
     # ------------------------------------------------------------------ #
     def run(
@@ -240,6 +306,7 @@ class SectorEngine:
                     executor,
                     self.event_shards,
                     self.chunk_size,
+                    accel=self.accel,
                 )
                 moved_total += moved
                 events, attacks = self._combat_phase(
@@ -252,6 +319,7 @@ class SectorEngine:
                     self.chunk_size,
                     collect_events=self.capture_frames,
                     human_index=human_index,
+                    accel=self.accel,
                 )
 
                 alive_h = sum(1 for agent in humans.values() if agent.is_alive)
@@ -307,7 +375,8 @@ class SectorEngine:
         executor=None,
         shards: int = 1,
         chunk_size: int = 0,
-    ) -> tuple[float, float, SpatialIndex]:
+        accel=None,
+    ) -> tuple[float, float, SpatialIndex | None]:
         """Every living agent walks toward its nearest living enemy.
 
         Humans move first against the pre-move zombie snapshot; zombies then
@@ -319,15 +388,33 @@ class SectorEngine:
         post-move human index)``.  The gap feeds the stall detector, and the
         index is reused by the combat phase because humans do not move again.
         """
+        bounds = getattr(sector, "bounds", None)
+        humans_list = list(humans.values())
+        zombies_list = list(zombies.values())
+
+        if accel is not None:
+            # One batched lookup per group; the plans come back in exactly the
+            # order (and with exactly the values) the scalar loop produces.
+            moved_total = 0.0
+            closest_gap = float("inf")
+            moved, gap = _apply_moves(
+                humans, _plan_moves_accel(humans_list, zombies_list, bounds, accel)
+            )
+            moved_total += moved
+            closest_gap = min(closest_gap, gap)
+            moved, gap = _apply_moves(
+                zombies, _plan_moves_accel(zombies_list, humans_list, bounds, accel)
+            )
+            moved_total += moved
+            closest_gap = min(closest_gap, gap)
+            return moved_total, closest_gap, None
+
         owned = executor is None
         if owned:
             executor = make_executor(shards)
         try:
-            humans_list = list(humans.values())
-            zombies_list = list(zombies.values())
             moved_total = 0.0
             closest_gap = float("inf")
-            bounds = getattr(sector, "bounds", None)
 
             # Humans: read-only zombie positions from before this tick's moves.
             zombie_index = SpatialIndex(zombies_list, bounds=bounds)
@@ -375,6 +462,7 @@ class SectorEngine:
         chunk_size: int = 0,
         collect_events: bool = True,
         human_index: SpatialIndex | None = None,
+        accel=None,
     ) -> tuple[list[str], int]:
         """Resolve every attack from the same snapshot (simultaneous).
 
@@ -391,24 +479,28 @@ class SectorEngine:
             humans_list = list(humans.values())
             zombies_list = list(zombies.values())
 
-            if human_index is None:
-                human_index = SpatialIndex(humans_list, bounds=bounds)
-            zombie_index = SpatialIndex(zombies_list, bounds=bounds)
+            if accel is not None:
+                human_plans = _plan_attacks_accel(humans_list, zombies_list, accel)
+                zombie_plans = _plan_attacks_accel(zombies_list, humans_list, accel)
+            else:
+                if human_index is None:
+                    human_index = SpatialIndex(humans_list, bounds=bounds)
+                zombie_index = SpatialIndex(zombies_list, bounds=bounds)
 
-            human_plan_chunks = executor.map(
-                partial(_plan_attacks, index=zombie_index),
-                chunked(
-                    humans_list, shard_parts(len(humans_list), shards, chunk_size)
-                ),
-            )
-            zombie_plan_chunks = executor.map(
-                partial(_plan_attacks, index=human_index),
-                chunked(
-                    zombies_list, shard_parts(len(zombies_list), shards, chunk_size)
-                ),
-            )
-            human_plans = _flatten(human_plan_chunks)
-            zombie_plans = _flatten(zombie_plan_chunks)
+                human_plan_chunks = executor.map(
+                    partial(_plan_attacks, index=zombie_index),
+                    chunked(
+                        humans_list, shard_parts(len(humans_list), shards, chunk_size)
+                    ),
+                )
+                zombie_plan_chunks = executor.map(
+                    partial(_plan_attacks, index=human_index),
+                    chunked(
+                        zombies_list, shard_parts(len(zombies_list), shards, chunk_size)
+                    ),
+                )
+                human_plans = _flatten(human_plan_chunks)
+                zombie_plans = _flatten(zombie_plan_chunks)
 
             events: list[str] = []
             damage: dict[int, int] = {}

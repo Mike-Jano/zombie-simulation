@@ -223,6 +223,9 @@ document.getElementById("run-info").textContent =
   " agents \u00b7 " + RUNINFO.frames + " frames" +
   (RUNINFO.parallel
     ? " \u00b7 " + RUNINFO.parallel.backend + " x" + RUNINFO.parallel.workers
+      + (RUNINFO.parallel.accel && RUNINFO.parallel.accel !== "python"
+        ? " \u00b7 " + RUNINFO.parallel.accel + " nearest-enemy"
+        : "")
     : "") +
   (RUNINFO.parallel && RUNINFO.parallel.seed != null
     ? " \u00b7 seed " + RUNINFO.parallel.seed

@@ -12,6 +12,9 @@ are written back to the database before being unloaded from memory.
 - Python 3.9+ (the bundled venv is 3.14)
 - A running PostgreSQL server
 - `psycopg` 3 (the PostgreSQL driver; installed as `psycopg[binary]`)
+- Optional: `numpy` (fast CPU nearest-enemy search) and `wgpu` (WebGPU compute
+  on AMD/Intel/NVIDIA/Apple GPUs). Both are in `requirements.txt`; without them
+  the simulation runs on the pure-Python scalar path.
 
 You do **not** need to create the database by hand. On start-up the app creates
 the `zombie_sim` database and the `agents` / `humans` / `zombies` tables if they
@@ -294,6 +297,61 @@ The index breaks ties on `(distance², agent_id)`, exactly like the old loop, so
 the chosen target is unchanged — `tests/test_spatial.py` checks it against a
 brute-force reference on random, collinear and duplicate layouts.
 
+That query is also the only part of a tick that can be answered for a whole
+group at once, so an optional accelerator replaces the per-agent loop with one
+batched call (`runtime/accelerator.py`, `utils/spatial_batch.py`):
+
+| `--accel` | Backend | Composes with the worker pool? |
+| --- | --- | --- |
+| `off` | reference scalar grid | yes |
+| `auto` (default) | numpy when installed, else scalar | yes |
+| `numpy` | numpy float64, tiled argmin | yes |
+| `gpu` | WebGPU compute shader via `wgpu-py` | no: one device, so the run goes serial |
+
+Both `numpy` and `wgpu` are optional at runtime; a missing module, missing
+adapter, software rasteriser, shader error or lost device all fall back to the
+scalar path and log once. `auto` never touches the GPU stack: enumerating
+adapters costs about a second on first use, and numpy composes with the process
+pool while a GPU run must be single-threaded. Ask for the GPU with
+`--accel gpu`.
+
+**The GPU cannot change a result.** WebGPU computes in f32, so it only nominates
+a winner; the choice is confirmed on the CPU in float64, and any query whose
+runner-up is inside the f32 error band is recomputed exactly. When an adapter is
+present, a `gpu` request also calibrates the device against numpy once (250
+queries × 250 targets) and demotes to numpy if the GPU loses. `python`, `numpy`
+and `gpu` runs therefore produce the same frames, counts and final states that
+get saved — `tests/test_accel.py` proves it at the sector-visit level. The report
+line and the HTML footer still name the backend that ran, so those lines differ
+by design.
+
+Only the target *lookup* is batched. Movement arithmetic, RNG draws and damage
+application stay in their original order, which is why the backend can be
+switched without invalidating a seed.
+
+Measured on the reference laptop (AMD Radeon 840M iGPU, 12 logical CPUs), with
+auto sectoring keeping groups at ~100–300 agents per side, numpy is the clear
+winner and the GPU loses its dispatch overhead:
+
+| Starting agents | scalar | numpy | gpu |
+| --- | --- | --- | --- |
+| 1200 (3 sectors) | 82 sector-ticks/s | 243 | 40 |
+| 3000 (6 sectors) | 58 | 299 | 135 |
+| 12000 (24 sectors) | 54 | 241 | 161 |
+
+The GPU pays off only when a single arena is genuinely large, because one
+dispatch plus its blocking readback costs ~0.6–2 ms whatever the group size.
+Pinning `--sectors 1` so each side holds hundreds to thousands of agents:
+
+| Agents in one sector | numpy | gpu |
+| --- | --- | --- |
+| 1200 (600 per side) | 44 sector-ticks/s | 9 |
+| 3000 (1500 per side) | 10 | 22 |
+| 12000 (6000 per side) | 0.8 | 8.2 |
+
+A discrete GPU changes the constants, not the shape: the accelerator is a tool
+for big sectors, and numpy remains the default because sectors are small.
+
 ### Sectors scale with the population
 
 ```
@@ -343,9 +401,10 @@ python main.py --run --humans 1500 --zombies 1500 --seed 7 --workers 12
 
 `--sectors N` still pins the count when you want to force a particular split.
 The report and the HTML footer record the backend, worker count, event-shard
-count, sector count and seed of the run. None of `--workers`, `--backend` or
-`--event-shards` changes the result: sharding only reorders *who computes* a
-proposal, never the proposal itself.
+count, sector count, accelerator and seed of the run. None of `--workers`,
+`--backend`, `--event-shards` or `--accel` changes the result: sharding only
+reorders *who computes* a proposal, never the proposal itself, and the
+accelerator only changes who answers "who is closest".
 
 ### Measuring
 
@@ -357,16 +416,27 @@ count:
 python tools/bench_parallel.py --population 1200
 python tools/bench_parallel.py --population 4000 --workers 1,2,4,8,12 --rounds 4
 python tools/bench_parallel.py --population 1200 --backend thread --event-shards 4
+python tools/bench_parallel.py --population 1200 --accel numpy
+python tools/bench_parallel.py --population 1200 --accel off
+python tools/bench_parallel.py --population 3000 --accel gpu
 ```
+
+`--accel` (the same names as `main.py`) measures every row with that backend,
+so the same population can be compared across `off`, `numpy` and `gpu`. A GPU
+run prints no pool rows because a real GPU run is serial by design; when the
+calibration demotes the device, the table says `numpy (CPU)` and the pool rows
+come back.
 
 On the reference machine (12 logical CPUs, Windows): 1200 agents make 3 sectors
 and scale 1x → 2.6x on 3 workers. 4000 agents make 8 sectors and reach 5.0x on
-8 workers. The outer pool is capped at the sector count; on the thread backend
-the rest of the `--workers` budget becomes per-sector shards, and the benchmark
-resolves the same budget and shard plan as a real run. A row is labelled when
-the outer pool is capped. These are in-memory runs that pickle agents every
-round; a real run sends only the sector description (workers load from
-PostgreSQL), so it has less IPC to do.
+8 workers. With `--accel numpy` the same 1200-agent workload goes 238 → 540 →
+791 sector-ticks/s on 1, 2 and 4 workers (2.3x and 3.3x), and the serial
+baseline itself is ~3x the scalar loop's 82 sector-ticks/s. The outer pool is
+capped at the sector count; on the thread backend the rest of the `--workers`
+budget becomes per-sector shards, and the benchmark resolves the same budget
+and shard plan as a real run. A row is labelled when the outer pool is capped.
+These are in-memory runs that pickle agents every round; a real run sends only
+the sector description (workers load from PostgreSQL), so it has less IPC to do.
 
 End to end, with PostgreSQL and spawn/insert included, 3000 agents (seed 7,
 auto sectoring) take **2.8 s single-threaded and 1.3 s on 6 workers**, and the
@@ -397,6 +467,11 @@ run that cut the pooled time from 2.2 s to 1.2 s when it was introduced.
   quadratically. `AGENTS_PER_SECTOR` is a target, but mono-type merging can make
   one sector larger (or the whole map one arena); bigger arenas mean fewer
   cross-sector rounds, not a scan bound.
+- The accelerator adds one optional import and about 31 MB of installed files
+  (`numpy`), plus about 10 MB for `wgpu` when installed. numpy costs a few
+  milliseconds at import and nothing per run after that; a GPU run pays ~1 s of
+  driver start-up on first use, holds one device for the whole process, and
+  cannot use the worker pool.
 - After each round the orchestrator clusters from the states the sector visits
   already reported (`SectorOutcome.final_states`) instead of issuing another
   `SELECT` over every living agent. The cache applies the same map clamping and
@@ -447,6 +522,7 @@ db/
   schema.py                 create/drop/clear the database and tables
   db_manager.py             load/insert/save agents, bulk writes, status counts
 runtime/
+  accelerator.py            nearest-enemy backends: python / numpy / WebGPU
   capabilities.py           CPU/GIL probes, worker and backend resolution
   sector_pool.py            process / thread / serial execution of sectors
 src/
@@ -462,6 +538,7 @@ utils/
   combat.py                 hit chance and damage formulas
   sectoring.py              grid sectoring and the sector-count policy
   spatial.py                uniform-grid nearest-enemy index
+  spatial_batch.py          tiled numpy argmin for a whole group at once
 vis/
   html_vis.py               self-contained HTML player
 tools/
@@ -469,6 +546,7 @@ tools/
   check.py                  full check: unit suite + live PostgreSQL
   test_db.ps1               opt-in PostgreSQL test runner
 tests/
+  test_accel.py             backend agreement, f32 safety band, determinism
   test_parallel.py          sector policy, determinism, backend equivalence
   test_event_parallel.py    tick sharding, chunk size, frame interval, cache
   test_spatial.py           spatial index vs brute-force reference
@@ -510,6 +588,11 @@ EVENT_PARALLEL = "auto"       # auto | off | thread
 EVENT_SHARDS = 0              # per-sector tick shards; 0 = split the budget
 EVENT_CHUNK_SIZE = 0          # agents per chunk cap; 0 = even split
 FRAME_INTERVAL = 2            # capture every Nth tick (1 = every tick)
+
+# Nearest-enemy acceleration
+ACCEL = "auto"                # auto | off | numpy | gpu
+NUMPY_TILE_ELEMS = 1 << 18    # pairs per temporary numpy tile (memory bound)
+ACCEL_MIN_PAIRS = 300         # below this, the scalar loop wins on any backend
 
 # Loop control (all four are what stop the run from freezing)
 SECTOR_REFRESH_TICKS = 15     # re-cluster and rebuild sectors after this many ticks
@@ -594,6 +677,7 @@ python main.py --run --humans 200 --zombies 200 --seed 7 --backend thread --even
 | `--backend ...` | `auto`, `serial`, `thread` or `process` |
 | `--event-shards N` | per-tick shards inside a sector; `0` = auto |
 | `--sectors N` | pin the sector count (reproducible runs); `0` = auto |
+| `--accel ...` | `auto`, `off`, `numpy` or `gpu` nearest-enemy backend |
 
 ---
 

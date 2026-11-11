@@ -24,6 +24,7 @@ from config.db_config import (
 from config import simulation_config as cfg
 from db import schema
 from db.db_manager import DBManager
+from runtime import accelerator as accel_mod
 from runtime.capabilities import VALID_BACKENDS, resolve_plan
 from src.simulation import Simulation
 from src.spawner import generate_spawns
@@ -90,6 +91,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "per-tick shards inside a sector; 0 = auto. Only used by the "
             "thread backend (free-threaded Python or --backend thread)"
+        ),
+    )
+    parser.add_argument(
+        "--accel",
+        choices=("auto", "off", "numpy", "gpu"),
+        default=None,
+        help=(
+            "nearest-enemy acceleration; auto = numpy when installed "
+            "(default), gpu forces WebGPU and falls back to numpy when absent"
         ),
     )
     return parser
@@ -349,10 +359,13 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
     backend = args.backend if args is not None else None
     sectors = args.sectors if args is not None else None
     event_shards = args.event_shards if args is not None else None
+    accel = getattr(args, "accel", None)
     map_bounds = map_bounds_for(total)
     run_max_sectors = max_sectors_for(total)
     plan = resolve_plan(workers, backend)
+    accel_plan = accel_mod.probe(accel)
     print(f"  Parallel: {plan.describe()}")
+    print(f"  Accel: {accel_plan.describe()}")
     print(f"  Map: {int(map_bounds[0])}..{int(map_bounds[2])} on each axis")
     if sectors:
         print(
@@ -413,6 +426,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
             backend=backend,
             sectors=sectors,
             event_shards=event_shards,
+            accel=accel,
             seed=seed,
             map_bounds=map_bounds,
             max_sectors=run_max_sectors,

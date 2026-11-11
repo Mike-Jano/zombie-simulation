@@ -84,6 +84,26 @@ EVENT_CHUNK_SIZE = 0
 FRAME_INTERVAL = 2
 
 # --------------------------------------------------------------------------- #
+# Acceleration (nearest-enemy query)
+# --------------------------------------------------------------------------- #
+# "auto"   -> numpy when it is installed, pure Python otherwise.  Auto stays on
+#             the CPU because numpy works inside the process pool, while a GPU
+#             run has to be single-threaded.
+# "numpy"  -> force the vectorised CPU path.
+# "gpu"    -> force WebGPU when the machine has a usable adapter; otherwise
+#             fall back to numpy (or pure Python) automatically.
+# "off"    -> always use the reference scalar loop.
+ACCEL = "auto"
+
+# Query pairs per temporary matrix tile.  Bounds numpy's peak memory to roughly
+# 3 x 8 bytes x this many; the sector engine only ever asks for ~500x500.
+NUMPY_TILE_ELEMS = 1 << 18
+
+# Below this many query-target pairs the Python loop beats handing the work to
+# numpy (measured crossover is ~300 pairs on a 12-core desktop).
+ACCEL_MIN_PAIRS = 300
+
+# --------------------------------------------------------------------------- #
 # Simulation loop
 # --------------------------------------------------------------------------- #
 # A sector runs for at most this many ticks before the map is re-clustered and

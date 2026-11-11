@@ -31,10 +31,11 @@ from dataclasses import dataclass, field
 
 from config import simulation_config as cfg
 from db.db_manager import DBManager, _clamp_int
+from runtime import accelerator as accel_mod
 from runtime.capabilities import ParallelPlan, resolve_event_shards, resolve_plan
 from runtime.sector_pool import POOL_FAILURES, SectorPool
 from src.sector_engine import SectorEngine, SectorOutcome, SectorReport, derive_seed
-from src.sector_task import SectorTask, _final_states
+from src.sector_task import SectorTask, _accelerator, _final_states
 from utils.sectoring import (
     build_sectors,
     map_bounds_for,
@@ -55,6 +56,7 @@ class SimulationReport:
     workers: int = 1
     backend: str = "serial"
     event_shards: int = 1
+    accel: str = "python"
     cpu_count: int = 1
     sector_count: int = 0
     seed: int | None = None
@@ -152,6 +154,8 @@ class SimulationReport:
         if self.event_shards > 1:
             parallel += f", {self.event_shards} event shard(s)/sector"
         parallel += f", {self.cpu_count} CPU(s)"
+        if self.accel != "python":
+            parallel += f", {self.accel} nearest-enemy"
         if self.seed is not None:
             parallel += f", seed {self.seed}"
         lines.append(parallel)
@@ -180,6 +184,7 @@ class Simulation:
         backend: str | None = None,
         sectors: int | None = None,
         event_shards: int | None = None,
+        accel: str | None = None,
         seed: int | None = None,
         map_bounds: tuple[float, float, float, float] | None = None,
         max_sectors: int | None = None,
@@ -197,6 +202,9 @@ class Simulation:
         self.requested_backend = backend
         self.requested_sectors = sectors
         self.requested_event_shards = event_shards
+        self.requested_accel = accel
+        # Resolved once per run; workers receive the chosen mode with each task.
+        self.accel_mode = "python"
 
         self.plan: ParallelPlan | None = None
         self.workers = 1
@@ -221,6 +229,14 @@ class Simulation:
     def run(self) -> SimulationReport:
         started = time.perf_counter()
         self._cached_rows = None
+
+        plan = accel_mod.configure(self.requested_accel)
+        if plan.calibrate:
+            # Forces the measurement while nothing is at stake, and reports
+            # whichever backend actually won.
+            accel_mod.get()
+        self.accel_mode = accel_mod.mode()
+        self.report.accel = self.accel_mode
 
         self.plan = resolve_plan(self.requested_workers, self.requested_backend)
 
@@ -436,6 +452,11 @@ class Simulation:
             return
         self._ensure_geometry(agent_count)
         self.plan = resolve_plan(self.requested_workers, self.requested_backend)
+        accel_plan = accel_mod.configure(self.requested_accel)
+        if accel_plan.calibrate:
+            # Resolve the GPU now: a demotion changes whether the pool is used.
+            accel_mod.get()
+        self.accel_mode = accel_mod.mode()
         sector_count = resolve_sector_count(
             agent_count,
             requested=self.requested_sectors,
@@ -471,7 +492,15 @@ class Simulation:
             self._pool = None
 
         plan = self.plan
-        if plan is None or not plan.is_parallel or sector_count <= 0:
+        if (
+            plan is None
+            or not plan.is_parallel
+            or sector_count <= 0
+            or self.accel_mode == "gpu"
+        ):
+            # One GPU is one device: worker processes would queue behind each
+            # other on it, so a GPU run keeps every sector on this thread and
+            # the device is used from end to end.
             self._parallel = False
             self.workers = 1
             self.event_shards = 1
@@ -576,6 +605,7 @@ class Simulation:
                 event_shards=self.event_shards,
                 db_config=self.db.config if parallel else None,
                 map_bounds=self.map_bounds,
+                accel=self.accel_mode,
             )
             for sector in sectors
         ]
@@ -609,6 +639,7 @@ class Simulation:
             max_ticks=task.max_ticks,
             capture_frames=task.capture_frames,
             event_shards=task.event_shards,
+            accel=_accelerator(task.accel),
         )
         try:
             outcome = engine.run(
@@ -665,6 +696,7 @@ class Simulation:
             "backend": self._active_backend(),
             "workers": self.workers,
             "event_shards": self.event_shards,
+            "accel": self.accel_mode,
             "cpu_count": self.plan.cpu_count if self.plan else 1,
             "sectors": sector_count,
             "seed": self.seed,

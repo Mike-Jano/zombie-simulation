@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import simulation_config as cfg  # noqa: E402
+from runtime import accelerator as accel_mod  # noqa: E402
 from runtime.capabilities import resolve_event_shards, resolve_plan  # noqa: E402
 from src.human import Human  # noqa: E402
 from src.sector_engine import SectorEngine  # noqa: E402
@@ -163,6 +164,32 @@ class SimulationParallelDecisionTests(unittest.TestCase):
             self.assertEqual(simulation.event_shards, 1)
         finally:
             simulation.close()
+
+    def test_gpu_run_uses_one_thread(self):
+        # One device, one process: worker processes would queue behind it.
+        simulation = Simulation(object())
+        simulation.plan = resolve_plan(8, "thread")
+        simulation.accel_mode = "gpu"
+        try:
+            simulation._decide_parallel(4)
+            self.assertFalse(simulation._parallel)
+            self.assertEqual(simulation.workers, 1)
+            self.assertEqual(simulation.event_shards, 1)
+        finally:
+            simulation.close()
+
+    def test_prewarm_decides_after_the_gpu_calibration(self):
+        simulation = Simulation(SimpleNamespace(config={}))
+        plan = accel_mod.AccelPlan("gpu", calibrate=True)
+        with patch.object(accel_mod, "configure", return_value=plan), patch.object(
+            accel_mod, "get"
+        ), patch.object(accel_mod, "mode", return_value="numpy"), patch.object(
+            simulation, "_decide_parallel"
+        ) as decide:
+            simulation.prewarm(1200)
+        decide.assert_called_once()
+        self.assertEqual(simulation.accel_mode, "numpy")
+        simulation.close()
 
 
 class ChunkingAndFrameTests(unittest.TestCase):
