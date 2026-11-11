@@ -11,7 +11,21 @@ are written back to the database before being unloaded from memory.
 
 - Python 3.9+ (the bundled venv is 3.14)
 - A running PostgreSQL server
-- `psycopg` 3 (the PostgreSQL driver; installed as `psycopg[binary]`)
+- `psycopg` 3 — **required**. It is imported at start-up, so the program cannot
+  run without it; there is no pure-Python fallback (unlike `numpy`/`wgpu`).
+  Install it with a copy-paste of this one line in your activated venv:
+
+  ```
+  pip install "psycopg[binary]"
+  ```
+
+  The `[binary]` extra pulls a prebuilt wheel, so no compiler or local
+  PostgreSQL headers are needed. To install the driver plus the optional
+  accelerators in one go:
+
+  ```
+  pip install -r requirements.txt
+  ```
 - Optional: `numpy` (fast CPU nearest-enemy search) and `wgpu` (WebGPU compute
   on AMD/Intel/NVIDIA/Apple GPUs). Both are in `requirements.txt`; without them
   the simulation runs on the pure-Python scalar path.
@@ -682,6 +696,16 @@ python main.py --run --humans 200 --zombies 200 --seed 7 --backend thread --even
 ---
 
 ## Troubleshooting
+
+**`ModuleNotFoundError: No module named 'psycopg'`** – the PostgreSQL driver is
+not installed in the interpreter you are running. Fix it with:
+
+```
+pip install "psycopg[binary]"
+```
+
+This fails at import, before any menu or connection message, so it looks like a
+crash rather than a missing dependency.
 
 **"Could not reach PostgreSQL"** – the server is not running, or the
 credentials are wrong. Use menu option 3, then option 4 to verify.
