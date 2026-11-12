@@ -3,7 +3,7 @@
 The expensive property here is not speed but sameness: a seeded run has to
 produce identical rows, frames and report lines whichever backend ran it, so
 these tests compare indices, distances and whole sector visits across
-``python``, ``numpy`` and (when the machine has one) ``gpu``.
+``python`` and ``numpy``.
 """
 
 from __future__ import annotations
@@ -45,11 +45,6 @@ def _brute_index(targets, point):
         if d2 < best_d2:
             best, best_d2 = index, d2
     return best
-
-
-def has_gpu() -> bool:
-    adapter, _ = accel_mod._gpu_adapter()
-    return adapter is not None
 
 
 class SpatialBatchTests(unittest.TestCase):
@@ -180,23 +175,6 @@ class CanonicalOrderTests(unittest.TestCase):
         self.assertEqual([plan.target_id for plan in batched], [1])
 
 
-class BandCheckTests(unittest.TestCase):
-    """The f32 safety band is the only thing standing between a GPU and f64."""
-
-    def test_near_tie_is_flagged(self):
-        # Real failure found on a Radeon 840M: two zombies 1.0 and
-        # 0.99999999999997 away, f32 rounded them the wrong way round because
-        # the query sat at (280, -334).
-        self.assertTrue(accel_mod._needs_exact(1.0, 0.9999999999999705, 334.0))
-
-    def test_clear_winner_is_not_flagged(self):
-        self.assertFalse(accel_mod._needs_exact(106369.0, 108352.0, 500.0))
-        self.assertFalse(accel_mod._needs_exact(4.0, 400.0, 10.0))
-
-    def test_identical_distances_are_flagged(self):
-        self.assertTrue(accel_mod._needs_exact(2.5, 2.5, 0.0))
-
-
 class ProbeTests(unittest.TestCase):
     def test_off_is_pure_python(self):
         self.assertEqual(accel_mod.probe("off").mode, "python")
@@ -204,65 +182,16 @@ class ProbeTests(unittest.TestCase):
     def test_numpy_request(self):
         self.assertEqual(accel_mod.probe("numpy").mode, "numpy")
 
-    def test_auto_never_starts_the_gpu_stack(self):
+    def test_auto_resolves_to_an_installed_backend(self):
         self.assertIn(accel_mod.probe("auto").mode, ("numpy", "python"))
 
-    def test_gpu_request_without_adapter_falls_back_to_numpy(self):
-        with mock.patch.object(
-            accel_mod, "_gpu_adapter", lambda: (None, "no usable adapter")
-        ):
-            plan = accel_mod.probe("gpu")
-        self.assertEqual(plan.mode, "numpy")
-        self.assertIn("no usable adapter", plan.detail)
-
-    def test_gpu_request_without_numpy_keeps_python(self):
+    def test_numpy_request_without_numpy_keeps_python(self):
         with mock.patch.object(accel_mod, "_numpy_available", lambda: False):
-            plan = accel_mod.probe("gpu")
+            plan = accel_mod.probe("numpy")
         self.assertEqual(plan.mode, "python")
 
     def test_describe_names_the_backend(self):
-        self.assertIn("gpu", accel_mod.AccelPlan("gpu", "Fake GPU").describe())
         self.assertIn("numpy", accel_mod.AccelPlan("numpy").describe())
-
-
-@unittest.skipUnless(has_gpu(), "no WebGPU adapter on this machine")
-class GpuAgreementTests(unittest.TestCase):
-    def setUp(self):
-        # Skip the speed calibration: this test is about agreement.
-        patcher = mock.patch.object(accel_mod, "_calibrate", lambda gpu, numpy: True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        accel_mod.configure("gpu")
-        backend = accel_mod.get()
-        if getattr(backend, "name", "") != "gpu":
-            self.skipTest("GPU device could not be created")
-        self.backend = backend
-        self.numpy = accel_mod.NumpyAccelerator()
-
-    def test_random_batches_match_numpy(self):
-        rng = random.Random(11)
-        for query_count, target_count in ((300, 300), (37, 900), (500, 250)):
-            queries = _points(query_count, rng)
-            targets = _points(target_count, rng)
-            self.assertEqual(
-                self.backend.nearest_cross(queries, targets),
-                self.numpy.nearest_cross(queries, targets),
-            )
-
-    def test_near_ties_and_duplicates_match_numpy(self):
-        queries = [(280.0, -334.0)] * 4 + [(0.0, 0.0)] * 4
-        targets = [
-            (280.73715414020074, -333.32427537148266),
-            (279.71265211443364, -334.95782628522113),
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-        ]
-        self.assertEqual(
-            self.backend.nearest_cross(queries, targets),
-            self.numpy.nearest_cross(queries, targets),
-        )
 
 
 class DeterminismTests(unittest.TestCase):
@@ -300,13 +229,6 @@ class DeterminismTests(unittest.TestCase):
 
     def test_python_and_numpy_visits_are_identical(self):
         self.assertEqual(self._visit(""), self._visit("numpy"))
-
-    @unittest.skipUnless(has_gpu(), "no WebGPU adapter on this machine")
-    def test_gpu_visits_are_identical_to_numpy(self):
-        reference = self._visit("numpy")
-        with mock.patch.object(accel_mod, "_calibrate", lambda gpu, numpy: True):
-            got = self._visit("gpu")
-        self.assertEqual(reference, got)
 
 
 if __name__ == "__main__":

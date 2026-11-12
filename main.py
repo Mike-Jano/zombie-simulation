@@ -95,11 +95,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--accel",
-        choices=("auto", "off", "numpy", "gpu"),
+        choices=("auto", "off", "numpy"),
         default=None,
         help=(
-            "nearest-enemy acceleration; auto = numpy when installed "
-            "(default), gpu forces WebGPU and falls back to numpy when absent"
+            "nearest-enemy acceleration; auto = numpy when installed (default)"
         ),
     )
     return parser

@@ -149,7 +149,7 @@ def _plan_attacks(agents, index: SpatialIndex):
 
 
 # --------------------------------------------------------------------------- #
-# Plan functions for an accelerator (numpy / GPU)
+# Plan functions for an accelerator (numpy)
 # --------------------------------------------------------------------------- #
 # These produce the same objects as the scalar planners above, in the same
 # order, so the merge loops below cannot tell which backend answered.  Only the
@@ -235,7 +235,7 @@ class SectorEngine:
         self.chunk_size = max(0, int(raw_chunk or 0))
         raw_interval = cfg.FRAME_INTERVAL if frame_interval is None else frame_interval
         self.frame_interval = max(1, int(raw_interval or 1))
-        # ``None`` keeps the reference scalar path; numpy/GPU objects come from
+        # ``None`` keeps the reference scalar path; numpy objects come from
         # runtime.accelerator and only change how the nearest enemy is found.
         self.accel = accel
 

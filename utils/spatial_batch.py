@@ -2,7 +2,7 @@
 
 The scalar path in :mod:`utils.spatial` answers "who is closest?" one agent at a
 time.  This module answers the same question for a whole group at once, which
-is what a vectorised CPU (numpy) or a GPU can actually use.
+is what a vectorised CPU (numpy) can actually use.
 
 Exactness is the whole point: the winner is chosen by ``(dist_sq, list order)``
 and the returned indices are then turned back into distances by

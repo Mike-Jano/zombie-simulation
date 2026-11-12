@@ -37,7 +37,7 @@ class SectorTask:
     event_shards: int = 1
     db_config: dict | None = None
     map_bounds: tuple[float, float, float, float] | None = None
-    # "python" | "numpy" | "gpu".  Workers are spawned, not forked, so the
+    # "python" | "numpy".  Workers are spawned, not forked, so the
     # orchestrator's choice has to travel with the task.
     accel: str = ""
     humans: list[Agent] | None = field(default=None, repr=False)
@@ -155,8 +155,8 @@ def _accelerator(mode: str):
     if accel_mod.requested() != mode:
         accel_mod.configure(mode)
     backend = accel_mod.get()
-    # A machine without numpy/wgpu resolves to the pure-Python stand-in, which
-    # is slower than the engine's own grid.  Use the grid instead.
+    # A machine without numpy resolves to the pure-Python stand-in, which is
+    # slower than the engine's own grid.  Use the grid instead.
     if getattr(backend, "name", "") == "python":
         return None
     return backend

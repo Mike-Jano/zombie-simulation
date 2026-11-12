@@ -230,11 +230,7 @@ class Simulation:
         started = time.perf_counter()
         self._cached_rows = None
 
-        plan = accel_mod.configure(self.requested_accel)
-        if plan.calibrate:
-            # Forces the measurement while nothing is at stake, and reports
-            # whichever backend actually won.
-            accel_mod.get()
+        accel_mod.configure(self.requested_accel)
         self.accel_mode = accel_mod.mode()
         self.report.accel = self.accel_mode
 
@@ -452,10 +448,7 @@ class Simulation:
             return
         self._ensure_geometry(agent_count)
         self.plan = resolve_plan(self.requested_workers, self.requested_backend)
-        accel_plan = accel_mod.configure(self.requested_accel)
-        if accel_plan.calibrate:
-            # Resolve the GPU now: a demotion changes whether the pool is used.
-            accel_mod.get()
+        accel_mod.configure(self.requested_accel)
         self.accel_mode = accel_mod.mode()
         sector_count = resolve_sector_count(
             agent_count,
@@ -492,15 +485,7 @@ class Simulation:
             self._pool = None
 
         plan = self.plan
-        if (
-            plan is None
-            or not plan.is_parallel
-            or sector_count <= 0
-            or self.accel_mode == "gpu"
-        ):
-            # One GPU is one device: worker processes would queue behind each
-            # other on it, so a GPU run keeps every sector on this thread and
-            # the device is used from end to end.
+        if plan is None or not plan.is_parallel or sector_count <= 0:
             self._parallel = False
             self.workers = 1
             self.event_shards = 1

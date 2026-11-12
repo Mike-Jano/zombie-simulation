@@ -86,12 +86,8 @@ FRAME_INTERVAL = 2
 # --------------------------------------------------------------------------- #
 # Acceleration (nearest-enemy query)
 # --------------------------------------------------------------------------- #
-# "auto"   -> numpy when it is installed, pure Python otherwise.  Auto stays on
-#             the CPU because numpy works inside the process pool, while a GPU
-#             run has to be single-threaded.
+# "auto"   -> numpy when it is installed, pure Python otherwise.
 # "numpy"  -> force the vectorised CPU path.
-# "gpu"    -> force WebGPU when the machine has a usable adapter; otherwise
-#             fall back to numpy (or pure Python) automatically.
 # "off"    -> always use the reference scalar loop.
 ACCEL = "auto"
 

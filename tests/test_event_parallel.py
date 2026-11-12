@@ -165,27 +165,12 @@ class SimulationParallelDecisionTests(unittest.TestCase):
         finally:
             simulation.close()
 
-    def test_gpu_run_uses_one_thread(self):
-        # One device, one process: worker processes would queue behind it.
-        simulation = Simulation(object())
-        simulation.plan = resolve_plan(8, "thread")
-        simulation.accel_mode = "gpu"
-        try:
-            simulation._decide_parallel(4)
-            self.assertFalse(simulation._parallel)
-            self.assertEqual(simulation.workers, 1)
-            self.assertEqual(simulation.event_shards, 1)
-        finally:
-            simulation.close()
-
-    def test_prewarm_decides_after_the_gpu_calibration(self):
+    def test_prewarm_resolves_the_accel_mode(self):
         simulation = Simulation(SimpleNamespace(config={}))
-        plan = accel_mod.AccelPlan("gpu", calibrate=True)
+        plan = accel_mod.AccelPlan("numpy")
         with patch.object(accel_mod, "configure", return_value=plan), patch.object(
-            accel_mod, "get"
-        ), patch.object(accel_mod, "mode", return_value="numpy"), patch.object(
-            simulation, "_decide_parallel"
-        ) as decide:
+            accel_mod, "mode", return_value="numpy"
+        ), patch.object(simulation, "_decide_parallel") as decide:
             simulation.prewarm(1200)
         decide.assert_called_once()
         self.assertEqual(simulation.accel_mode, "numpy")

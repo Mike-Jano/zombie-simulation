@@ -11,13 +11,11 @@ backend the rest of the ``--workers`` budget becomes per-sector shards, and the
 benchmark resolves both from the same helpers as a real run.
 
 ``--accel`` picks the nearest-enemy backend for the whole measurement, so the
-same population can be compared across ``python``, ``numpy`` and ``gpu``. A GPU
-run is never pooled here: one device, one process, exactly like a real run.
+same population can be compared across ``python`` and ``numpy``.
 
     python tools/bench_parallel.py
     python tools/bench_parallel.py --population 4000 --workers 1,2,4,8,12
     python tools/bench_parallel.py --accel numpy
-    python tools/bench_parallel.py --accel gpu --population 3000
 """
 
 from __future__ import annotations
@@ -155,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--accel",
-        choices=("auto", "off", "numpy", "gpu"),
+        choices=("auto", "off", "numpy"),
         default=None,
         help=(
             "nearest-enemy backend for every row (default: the configured "
@@ -192,16 +190,10 @@ def main(argv: list[str] | None = None) -> int:
 
     plan = resolve_plan()
     accel_plan = accel_mod.configure(args.accel)
-    if accel_plan.calibrate:
-        # Resolve auto/GPU now so the table measures what a run would use.
-        accel_mod.get()
     accel_mode = accel_mod.mode()
     print()
     print(f"Plan      : {plan.describe()}")
-    print(
-        f"Accel     : "
-        f"{accel_mod.AccelPlan(accel_mode, accel_plan.detail).describe()}"
-    )
+    print(f"Accel     : {accel_plan.describe()}")
     print(f"Population: {humans} humans / {zombies} zombies ({len(agents)} total)")
     print(f"Tick cap  : runs are bounded by MAX_TOTAL_TICKS={cfg.MAX_TOTAL_TICKS}")
 
@@ -249,19 +241,6 @@ def main(argv: list[str] | None = None) -> int:
         f"{elapsed:>8.2f} {ticks / elapsed:>9.1f} {1.0:>7.2f}x "
         f"{1.0:>9.0%} {'-':>8}"
     )
-
-    if accel_mode == "gpu":
-        print()
-        print(
-            "Note: a GPU run is single-threaded (one device, one process), so "
-            "there are no pool rows to measure."
-        )
-        projected = cfg.MAX_TOTAL_TICKS / (ticks / elapsed)
-        print(
-            f"Projected full run ({cfg.MAX_TOTAL_TICKS} world ticks): "
-            f"~{projected:.1f}s of sector work"
-        )
-        return 0
 
     results = []
     measured_plans: set[tuple[int, int]] = set()
