@@ -191,20 +191,21 @@ split is what makes the tick safe to shard without changing behaviour — see
 
 | | Humans | Zombies |
 | --- | --- | --- |
-| Range | `weapon_tier * 4` units (4–20) | fixed 2.5 units |
+| Range | `weapon_tier * 2.5` units (2.5–15) | fixed 2.5 units |
 | Damage | random, `tier*3 … tier*9` | random, `strength*5 … strength*15` |
 | Accuracy | roll to hit; falls off with distance, higher tier keeps accuracy further out | always hits in range |
 
 A tier-5 human averages 30 damage per hit, so a zombie (50–200 HP) takes
 several shots. A zombie's bite averages 10 damage per strength point (30 at
 strength 3, 50 at strength 5), so a human that lets it close usually dies in
-about five bites. Humans still out-range zombies — they get free shots while
-the horde walks in — but they can no longer mow it down before it arrives.
+about five bites. Humans still out-range zombies (tier 1 sits exactly at the
+zombie's 2.5-unit reach), so they get free shots while the horde walks in —
+but they can no longer mow it down before it arrives.
 
 Rare **super agents** (default `0.00002` per spawned agent, either side) get
 double the spawn-max tier/strength (10) and triple the spawn-max health (450
 for a human, 600 for a zombie), with speed fixed at 3. They use the same combat
-formulas, so a super human hits for 30–90 at 40 units. The DB has no super
+formulas, so a super human hits for 30–90 at 25 units. The DB has no super
 column: a stat above the normal spawn range is the marker, and the HTML player
 draws a yellow ring around them.
 
@@ -601,7 +602,7 @@ ZOMBIE_ATTACK_RANGE = 2.5
 ZOMBIE_STOP_DISTANCE = 1.0
 ZOMBIE_DAMAGE_PER_STRENGTH = (5, 15)
 
-HUMAN_RANGE_PER_TIER = 4
+HUMAN_RANGE_PER_TIER = 2.5
 HUMAN_DAMAGE_PER_TIER = (3, 9)
 HUMAN_HIT_BASE = 0.9
 HUMAN_HIT_FALLOFF = 0.045
@@ -609,7 +610,7 @@ HUMAN_HIT_FLOOR = 0.05
 
 HUMAN_HEALTH_RANGE = (80, 150)
 HUMAN_SPEED_RANGE = (1, 6)
-HUMAN_WEAPON_TIER_RANGE = (1, 5)
+HUMAN_WEAPON_TIER_RANGE = (1, 6)
 ZOMBIE_HEALTH_RANGE = (50, 200)
 ZOMBIE_SPEED_RANGE = (2, 5)
 ZOMBIE_STRENGTH_RANGE = (2, 5)

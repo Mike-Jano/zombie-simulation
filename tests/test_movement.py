@@ -123,10 +123,11 @@ class HumanStandoffTests(unittest.TestCase):
         self.assertAlmostEqual(zombie.x_pos, 3.0, places=4)
 
     def test_human_parked_at_range_can_attack(self):
-        # Exactly at the boundary the human is inside range and attacks; the
-        # zombie's 2.5-unit reach does not. This is the guard for the float
-        # residue that would otherwise leave the human unable to fire.
-        human = make_human()
+        # Exactly at the boundary the human is inside range and attacks; a
+        # tier-2 human's 5 units out-reach the zombie's 2.5, so only the human
+        # fires. This is the guard for the float residue that would otherwise
+        # leave the human unable to fire.
+        human = make_human(tier=2)
         zombie = make_zombie(human.max_range)
         events, attacks = SectorEngine._combat_phase(
             sector(), {human.agent_id: human}, {zombie.agent_id: zombie}, random.Random(0)
