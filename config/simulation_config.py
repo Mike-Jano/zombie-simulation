@@ -166,7 +166,7 @@ ZOMBIE_STRENGTH_RANGE = (2, 5)
 # double the spawn maximum and whose health is triple it. Speed is fixed rather
 # than doubled. The chance is rolled once per spawned agent, so it is also the
 # knob to raise temporarily to see one in a small run.
-SUPER_AGENT_CHANCE = 0.00002
+SUPER_AGENT_CHANCE = 0.0001          # 1 in 10,000 spawned agents
 SUPER_STAT_MULTIPLIER = 2
 SUPER_HEALTH_MULTIPLIER = 3
 SUPER_SPEED = 3
