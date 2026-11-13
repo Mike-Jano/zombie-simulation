@@ -698,7 +698,8 @@ enforced while spawning, saving and moving agents.
 The `is_super` / `is_champion` columns cannot be added to an existing table by
 `CREATE TABLE IF NOT EXISTS`, so a database created before champions shows the
 missing-column message once; choose **2) Clear & recreate database** to upgrade
-it. That also deletes any champions.
+it. That also deletes any champions. A login entered in option 3 is saved even
+when this message appears, so the reset can be run straight away.
 
 ### Command line
 

@@ -187,7 +187,7 @@ class ResetOrderTests(unittest.TestCase):
 
 
 class SettingsOrderTests(unittest.TestCase):
-    def _run(self, test_ok: bool, password: str = ""):
+    def _run(self, test_result, password: str = ""):
         config = {
             "host": "old",
             "port": 5432,
@@ -195,29 +195,61 @@ class SettingsOrderTests(unittest.TestCase):
             "user": "u",
             "password": "p",
         }
+        out = io.StringIO()
         with patch("builtins.input", side_effect=["new", "5432", "d", "u"]), patch.object(
             main.getpass, "getpass", return_value=password
-        ), patch.object(main, "try_bootstrap", return_value=test_ok), patch.object(
+        ), patch.object(main, "check_database", return_value=test_result), patch.object(
             main, "save_db_config", return_value=Path("x.ini")
-        ) as save, redirect_stdout(io.StringIO()):
+        ) as save, redirect_stdout(out):
             result = main.handle_settings(config)
-        return result, save
+        return result, save, out.getvalue()
 
     def test_failed_test_does_not_save(self):
-        result, save = self._run(False)
+        result, save, _out = self._run((False, None))
         save.assert_not_called()
         self.assertEqual(result["host"], "old")
 
+    def test_stale_schema_still_saves(self):
+        stale = (
+            "The database is missing required column(s): agents.is_super. "
+            "Choose 2) Clear & recreate database once, then try again."
+        )
+        result, save, out = self._run((True, stale))
+        save.assert_called_once()
+        self.assertEqual(result["host"], "new")
+        self.assertIn("missing required column", out)
+        self.assertIn("option 2", out)
+
     def test_successful_test_saves(self):
-        result, save = self._run(True)
+        result, save, _out = self._run((True, None))
         save.assert_called_once()
         self.assertEqual(result["host"], "new")
         self.assertEqual(result["password"], "p")
 
     def test_dash_clears_the_password(self):
-        result, save = self._run(True, password="-")
+        result, save, _out = self._run((True, None), password="-")
         save.assert_called_once()
         self.assertEqual(result["password"], "")
+
+
+class CheckDatabaseTests(unittest.TestCase):
+    def test_stale_schema_is_a_working_login(self):
+        stale = "The database is missing required column(s): agents.is_super."
+        with patch.object(main.schema, "bootstrap", return_value=stale):
+            self.assertEqual(main.check_database({}), (True, stale))
+
+    def test_failed_connection_is_not_a_working_login(self):
+        with patch.object(
+            main.schema, "bootstrap", side_effect=main.psycopg.Error("no")
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(main.check_database({}), (False, None))
+
+    def test_try_bootstrap_still_refuses_a_stale_schema(self):
+        stale = "The database is missing required column(s): agents.is_super."
+        with patch.object(
+            main.schema, "bootstrap", return_value=stale
+        ), redirect_stdout(io.StringIO()):
+            self.assertFalse(main.try_bootstrap({}))
 
 
 class ChampionFlowTests(unittest.TestCase):

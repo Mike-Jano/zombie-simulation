@@ -197,17 +197,25 @@ def ensure_database(config: dict) -> bool:
     return True
 
 
-def try_bootstrap(config: dict) -> bool:
+def check_database(config: dict) -> tuple[bool, str | None]:
+    """Test a login: ``(connection works, missing-schema message)``.
+
+    A stale schema is not a bad login: the reset (option 2) needs these
+    credentials, so callers that save settings must distinguish the two.
+    """
     try:
-        missing = schema.bootstrap(config)
+        return True, schema.bootstrap(config)
     except psycopg.Error as exc:
         _print_db_error(exc)
-        return False
+        return False, None
+
+
+def try_bootstrap(config: dict) -> bool:
+    ok, missing = check_database(config)
     if missing:
         print()
         print(missing)
-        return False
-    return True
+    return ok and not missing
 
 
 def load_champions(config: dict) -> list[dict]:
@@ -269,12 +277,17 @@ def handle_settings(config: dict) -> dict:
     elif password:
         updated["password"] = password
 
-    if not try_bootstrap(updated):
+    ok, missing = check_database(updated)
+    if not ok:
         print("Not saved - the database test failed (see above).")
         return config
     saved_to = save_db_config(updated)
     print(f"Saved to {saved_to}")
     print("Connection OK.")
+    if missing:
+        print()
+        print(missing)
+        print("The settings were saved, so option 2 can recreate the schema now.")
     return updated
 
 
