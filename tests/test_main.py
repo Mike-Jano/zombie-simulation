@@ -220,5 +220,344 @@ class SettingsOrderTests(unittest.TestCase):
         self.assertEqual(result["password"], "")
 
 
+class ChampionFlowTests(unittest.TestCase):
+    def test_carry_over_changes_defaults_minimums_and_spawn_shortfall(self):
+        calls: dict = {"ask_int": []}
+
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                pass
+
+            def connect(self):
+                pass
+
+            def try_run_lock(self):
+                return True
+
+            def load_champions(self):
+                return champions
+
+            def save_champion_upgrades(self, rows):
+                calls["promoted"] = rows
+
+            def insert_agents(self, specs):
+                calls["spawned"] = specs
+
+            def mark_champions(self):
+                calls["marked"] = True
+
+            def close(self):
+                pass
+
+        class FakeReport:
+            def render(self):
+                return "report"
+
+        class FakeSimulation:
+            def __init__(self, _db, **_kwargs):
+                pass
+
+            def prewarm(self, count):
+                calls["prewarm"] = count
+
+            def run(self):
+                return FakeReport()
+
+            def close(self):
+                pass
+
+        champions = [
+            {
+                "agent_id": i,
+                "agent_type": "human",
+                "health": 100,
+                "speed": 3,
+                "is_super": False,
+                "weapon_tier": 3,
+                "strength": None,
+            }
+            for i in (1, 2)
+        ]
+
+        def fake_ask_int(prompt, default, minimum=0, maximum=None):
+            calls["ask_int"].append((default, minimum))
+            return {0: 5, 1: 3}[len(calls["ask_int"]) - 1]
+
+        def fake_spawns(humans, zombies, _rng, map_bounds=None):
+            calls["new"] = (humans, zombies)
+            return []
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(main, "load_champion_counts", return_value={"human": 2})
+            )
+            stack.enter_context(
+                patch.object(main, "load_champions", return_value=champions)
+            )
+            stack.enter_context(patch.object(main, "ask_yes_no", return_value=True))
+            stack.enter_context(
+                patch.object(main, "ask_int", side_effect=fake_ask_int)
+            )
+            stack.enter_context(
+                patch.object(main, "ask_choice", return_value=2)
+            )
+            stack.enter_context(patch("builtins.input", return_value=""))
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            stack.enter_context(
+                patch.object(main, "try_bootstrap", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(main.schema, "clear_agents", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(main, "generate_spawns", side_effect=fake_spawns)
+            )
+            stack.enter_context(
+                patch.object(main, "Simulation", FakeSimulation)
+            )
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            ok = main.handle_simulation({}, None)
+
+        self.assertTrue(ok)
+        # Human champions raise the human default/minimum; the zombie side
+        # keeps the normal 40/0.
+        self.assertEqual(calls["ask_int"][0], (2, 2))
+        self.assertEqual(calls["ask_int"][1], (40, 0))
+        self.assertEqual(calls["new"], (3, 3))
+        self.assertEqual(calls["prewarm"], 8)
+        self.assertEqual(len(calls["promoted"]), 2)
+        self.assertTrue(calls["marked"])
+
+
+class BatchChampionTests(unittest.TestCase):
+    def test_counts_below_the_champion_minimum_are_raised(self):
+        calls: dict = {}
+        champions = [
+            {
+                "agent_id": index,
+                "agent_type": "human",
+                "health": 100,
+                "speed": 3,
+                "is_super": False,
+                "weapon_tier": 3,
+                "strength": None,
+            }
+            for index in (1, 2, 3)
+        ]
+
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                pass
+
+            def connect(self):
+                pass
+
+            def try_run_lock(self):
+                return True
+
+            def load_champions(self):
+                return champions
+
+            def save_champion_upgrades(self, rows):
+                calls["promoted"] = rows
+
+            def insert_agents(self, specs):
+                calls["spawned"] = specs
+
+            def mark_champions(self):
+                calls["marked"] = True
+
+            def close(self):
+                pass
+
+        class FakeReport:
+            def render(self):
+                return "report"
+
+        class FakeSimulation:
+            def __init__(self, _db, **_kwargs):
+                pass
+
+            def prewarm(self, count):
+                calls["prewarm"] = count
+
+            def run(self):
+                return FakeReport()
+
+            def close(self):
+                pass
+
+        def fake_spawns(humans, zombies, _rng, map_bounds=None):
+            calls["new"] = (humans, zombies)
+            return []
+
+        args = argparse.Namespace(
+            run=True,
+            humans=1,
+            zombies=0,
+            seed=1,
+            mode="headless",
+            headless=True,
+            workers=1,
+            backend="serial",
+            sectors=None,
+            event_shards=None,
+            carry_champions=True,
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(main, "load_champions", return_value=champions)
+            )
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            stack.enter_context(
+                patch.object(main, "try_bootstrap", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(main.schema, "clear_agents", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(main, "generate_spawns", side_effect=fake_spawns)
+            )
+            stack.enter_context(
+                patch.object(main, "Simulation", FakeSimulation)
+            )
+            out = stack.enter_context(redirect_stdout(io.StringIO()))
+            ok = main.handle_simulation({}, args)
+            text = out.getvalue()
+
+        self.assertTrue(ok)
+        self.assertIn("Raised to the champion minimum: 3 human(s)", text)
+        self.assertEqual(calls["new"], (0, 0))
+        self.assertEqual(calls["prewarm"], 3)
+        self.assertEqual(len(calls["promoted"]), 3)
+
+
+class StaleChampionsTests(unittest.TestCase):
+    def test_champions_changed_after_the_prompt_abort_before_clearing(self):
+        champions = [{"agent_id": 1, "agent_type": "human"}]
+
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                pass
+
+            def connect(self):
+                pass
+
+            def try_run_lock(self):
+                return True
+
+            def load_champions(self):
+                return []  # another process cleared them after the prompt
+
+            def close(self):
+                pass
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    main, "load_champion_counts", return_value={"human": 1}
+                )
+            )
+            stack.enter_context(
+                patch.object(main, "load_champions", return_value=champions)
+            )
+            stack.enter_context(patch.object(main, "ask_yes_no", return_value=True))
+            stack.enter_context(patch.object(main, "ask_int", side_effect=[5, 5]))
+            stack.enter_context(patch.object(main, "ask_choice", return_value=2))
+            stack.enter_context(patch("builtins.input", return_value=""))
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            stack.enter_context(
+                patch.object(main, "try_bootstrap", return_value=True)
+            )
+            clear = stack.enter_context(
+                patch.object(main.schema, "clear_agents")
+            )
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertFalse(main.handle_simulation({}, None))
+
+        clear.assert_not_called()
+
+    def test_declining_after_the_champion_count_changes_aborts_before_clearing(self):
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                pass
+
+            def connect(self):
+                pass
+
+            def try_run_lock(self):
+                return True
+
+            def count_champions(self):
+                return {"human": 5}  # another run finished after the prompt
+
+            def close(self):
+                pass
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    main, "load_champion_counts", return_value={"human": 2}
+                )
+            )
+            stack.enter_context(
+                patch.object(main, "ask_yes_no", return_value=False)
+            )
+            stack.enter_context(patch.object(main, "ask_int", side_effect=[5, 5]))
+            stack.enter_context(patch.object(main, "ask_choice", return_value=2))
+            stack.enter_context(patch("builtins.input", return_value=""))
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            stack.enter_context(
+                patch.object(main, "try_bootstrap", return_value=True)
+            )
+            clear = stack.enter_context(
+                patch.object(main.schema, "clear_agents")
+            )
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertFalse(main.handle_simulation({}, None))
+
+        clear.assert_not_called()
+
+
+class LoadChampionsFailureTests(unittest.TestCase):
+    def _call(self, error: Exception):
+        class FakeDB:
+            def __init__(self, _config):
+                pass
+
+            def connect(self):
+                pass
+
+            def load_champions(self):
+                raise error
+
+            def close(self):
+                pass
+
+        with patch.object(main, "DBManager", FakeDB):
+            return main.load_champions({})
+
+    def test_old_schema_means_no_champions(self):
+        error = main.psycopg.errors.UndefinedColumn("is_champion")
+        self.assertEqual(self._call(error), [])
+
+    def test_other_database_errors_are_not_hidden(self):
+        error = main.psycopg.OperationalError("server went away")
+        with self.assertRaises(main.psycopg.Error):
+            self._call(error)
+
+
 if __name__ == "__main__":
     unittest.main()

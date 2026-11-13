@@ -86,6 +86,10 @@ class LayoutCaptureTests(unittest.TestCase):
             self.assertIn('tag === "BUTTON"', html)
             self.assertIn('"1":[[0.0,0.0,10.0,10.0]]', html)
             self.assertNotIn("__LAYOUTS__", html)
+            self.assertIn("Super (white ring)", html)
+            self.assertIn("Champion (yellow ring)", html)
+            self.assertIn("isChampion", html)
+            self.assertIn('"#ffffff"', html)
 
 
 class PruneOldRunsTests(unittest.TestCase):

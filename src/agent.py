@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 Bounds = tuple[float, float, float, float]  # min_x, min_y, max_x, max_y
 
@@ -19,6 +19,11 @@ class Agent:
     y_pos: float
     health: int
     speed: int
+    # Keyword-only so ``Human(..., weapon_tier)`` positional construction keeps
+    # working. Both flags are stored because a champion's upgraded stat can
+    # exceed the spawn maximum and must not be mistaken for a super agent.
+    is_super: bool = field(default=False, kw_only=True)
+    is_champion: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         self.health = max(0, int(self.health))
@@ -79,13 +84,8 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Reporting
     # ------------------------------------------------------------------ #
-    @property
-    def is_super(self) -> bool:
-        """Rare over-max agent; subclasses check their own stat against spawn max."""
-        return False
-
     def snapshot(self) -> tuple:
-        """Compact tuple consumed by the visualisers (last item is the super flag)."""
+        """Compact tuple consumed by the visualisers (super, then champion flag)."""
         return (
             self.agent_id,
             self.agent_type,
@@ -94,6 +94,7 @@ class Agent:
             int(self.health),
             bool(self.is_alive),
             bool(self.is_super),
+            bool(self.is_champion),
         )
 
 

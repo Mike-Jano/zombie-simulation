@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS agents (
     y_pos      INTEGER NOT NULL,
     health     INTEGER NOT NULL,
     speed      INTEGER NOT NULL,
+    is_super   BOOLEAN NOT NULL DEFAULT FALSE,
+    is_champion BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (agent_id, agent_type)
 );
 """
@@ -157,7 +159,10 @@ def drop_tables(config: dict) -> None:
 
 
 REQUIRED_COLUMNS = {
-    "agents": ("agent_id", "agent_type", "is_alive", "x_pos", "y_pos", "health", "speed"),
+    "agents": (
+        "agent_id", "agent_type", "is_alive", "x_pos", "y_pos", "health",
+        "speed", "is_super", "is_champion",
+    ),
     "humans": ("agent_id", "agent_type", "weapon_tier"),
     "zombies": ("agent_id", "agent_type", "strength"),
 }
@@ -227,10 +232,12 @@ def reset_database(config: dict) -> None:
     create_tables(config)
 
 
-def clear_agents(config: dict) -> int:
-    """Delete every agent (and cascade to subtables). Returns rows removed.
+def clear_agents(config: dict, keep_champions: bool = False) -> int:
+    """Delete agents (and cascade to subtables). Returns rows removed.
 
-    Safe to call when the tables do not exist yet.
+    With ``keep_champions`` the flagged survivors of the previous run stay in
+    place for carry-over; every other row is deleted. Safe to call when the
+    tables do not exist yet.
     """
     conn = psycopg.connect(**connect_params(config))
     conn.autocommit = True
@@ -240,6 +247,18 @@ def clear_agents(config: dict) -> int:
                 return 0
             cur.execute("SELECT count(*) FROM agents;")
             removed = cur.fetchone()[0]
+            if keep_champions:
+                cur.execute(
+                    "SELECT 1 FROM pg_attribute "
+                    "WHERE attrelid = to_regclass('agents') "
+                    "AND attname = 'is_champion' AND NOT attisdropped"
+                )
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "DELETE FROM agents "
+                        "WHERE NOT is_champion OR NOT is_alive;"
+                    )
+                    return cur.rowcount
             cur.execute("TRUNCATE TABLE agents RESTART IDENTITY CASCADE;")
             return removed
     finally:

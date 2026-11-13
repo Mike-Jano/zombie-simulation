@@ -109,7 +109,7 @@ class DBManager:
                         )
 
                     placeholders = ", ".join(
-                        ["(%s, %s, %s, %s, %s, %s, %s)"] * len(chunk)
+                        ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk)
                     )
                     params = []
                     for agent_id, spec in zip(ids, chunk):
@@ -122,13 +122,14 @@ class DBManager:
                                 _clamp_int(spec["y_pos"], self.map_bounds),
                                 int(spec["health"]),
                                 int(spec["speed"]),
+                                bool(spec.get("is_super", False)),
                             )
                         )
                     cur.execute(
                         f"""
                         INSERT INTO agents
                             (agent_id, agent_type, is_alive, x_pos, y_pos,
-                             health, speed)
+                             health, speed, is_super)
                         VALUES {placeholders}
                         """,
                         params,
@@ -214,9 +215,136 @@ class DBManager:
             raise
         return len(rows)
 
+    def save_champion_upgrades(self, rows: list[dict]) -> int:
+        """Write promoted champion stats and positions back in place."""
+        if not rows:
+            return 0
+        assert self.conn is not None
+        try:
+            with self.conn.cursor() as cur:
+                for chunk in _chunks(rows):
+                    placeholders = ", ".join(
+                        ["(%s, %s, %s, %s, %s, %s, %s)"] * len(chunk)
+                    )
+                    params = []
+                    for row in chunk:
+                        params.extend(
+                            (
+                                int(row["agent_id"]),
+                                int(row["health"]),
+                                int(row["speed"]),
+                                _clamp_int(row["x_pos"], self.map_bounds),
+                                _clamp_int(row["y_pos"], self.map_bounds),
+                                bool(row["is_super"]),
+                                True,
+                            )
+                        )
+                    cur.execute(
+                        f"""
+                        UPDATE agents AS a
+                           SET health = v.health,
+                               speed = v.speed,
+                               x_pos = v.x_pos,
+                               y_pos = v.y_pos,
+                               is_super = v.is_super,
+                               is_champion = v.is_champion
+                          FROM (VALUES {placeholders})
+                               AS v(agent_id, health, speed, x_pos, y_pos,
+                                    is_super, is_champion)
+                         WHERE a.agent_id = v.agent_id
+                        """,
+                        params,
+                    )
+
+                for table, column, key in (
+                    ("humans", "weapon_tier", "weapon_tier"),
+                    ("zombies", "strength", "strength"),
+                ):
+                    rows_for_table = [
+                        (int(row["agent_id"]), int(row[key]))
+                        for row in rows
+                        if row["agent_type"] == table[:-1]
+                    ]
+                    for chunk in _chunks(rows_for_table):
+                        placeholders = ", ".join(["(%s, %s)"] * len(chunk))
+                        cur.execute(
+                            f"""
+                            UPDATE {table} AS t
+                               SET {column} = v.stat_value
+                              FROM (VALUES {placeholders})
+                                   AS v(agent_id, stat_value)
+                             WHERE t.agent_id = v.agent_id
+                            """,
+                            [value for row in chunk for value in row],
+                        )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return len(rows)
+
+    def mark_champions(self) -> int:
+        """Flag the run's survivors for the next carry-over."""
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE agents SET is_champion = is_alive")
+            updated = cur.rowcount
+        self.conn.commit()
+        return updated
+
     # ------------------------------------------------------------------ #
     # Reads
     # ------------------------------------------------------------------ #
+    def load_champions(self) -> list[dict]:
+        """Return the flagged survivors of the previous run."""
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.agent_id, a.agent_type, a.health, a.speed, a.is_super,
+                       h.weapon_tier, z.strength
+                  FROM agents a
+                  LEFT JOIN humans h
+                         ON h.agent_id = a.agent_id
+                        AND h.agent_type = a.agent_type
+                  LEFT JOIN zombies z
+                         ON z.agent_id = a.agent_id
+                        AND z.agent_type = a.agent_type
+                 WHERE a.is_champion AND a.is_alive
+                 ORDER BY a.agent_id
+                """
+            )
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [
+            {
+                "agent_id": row[0],
+                "agent_type": row[1],
+                "health": row[2],
+                "speed": row[3],
+                "is_super": row[4],
+                "weapon_tier": row[5],
+                "strength": row[6],
+            }
+            for row in rows
+        ]
+
+    def count_champions(self) -> dict[str, int]:
+        """Count the flagged survivors by side; cheaper than loading rows."""
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT agent_type, count(*)
+                  FROM agents
+                 WHERE is_champion AND is_alive
+                 GROUP BY agent_type
+                """
+            )
+            counts = dict(cur.fetchall())
+        self.conn.commit()
+        return counts
+
     def fetch_alive_agents(self) -> list[tuple[int, str, int, int]]:
         """Return ``(agent_id, agent_type, x_pos, y_pos)`` for living agents."""
         assert self.conn is not None
@@ -249,7 +377,8 @@ class DBManager:
             cur.execute(
                 """
                 SELECT a.agent_id, a.agent_type, a.is_alive, a.x_pos, a.y_pos,
-                       a.health, a.speed, h.weapon_tier, z.strength
+                       a.health, a.speed, a.is_super, a.is_champion,
+                       h.weapon_tier, z.strength
                   FROM agents a
                   LEFT JOIN humans h
                          ON h.agent_id = a.agent_id
@@ -278,6 +407,8 @@ class DBManager:
             y_pos,
             health,
             speed,
+            is_super,
+            is_champion,
             weapon_tier,
             strength,
         ) in rows:
@@ -292,6 +423,8 @@ class DBManager:
                         health=int(health),
                         speed=int(speed),
                         weapon_tier=int(weapon_tier or 1),
+                        is_super=is_super,
+                        is_champion=is_champion,
                     )
                 )
             else:
@@ -305,6 +438,8 @@ class DBManager:
                         health=int(health),
                         speed=int(speed),
                         strength=int(strength or 1),
+                        is_super=is_super,
+                        is_champion=is_champion,
                     )
                 )
         return humans, zombies

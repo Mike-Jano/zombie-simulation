@@ -88,18 +88,21 @@ Database: postgres@localhost:5432/zombie_sim
   2) Clear & recreate database
   3) Database settings
   4) Database status
-  5) Exit (clears agents)
+  5) Exit (keeps champions)
 ```
 
 - **1) Start new simulation** – prompts for the number of humans and zombies,
   the visualisation mode, and an optional random seed (same seed = same run).
-- **2) Clear & recreate database** – drops and rebuilds the three tables at will.
+  If the previous run left survivors, it first asks whether to carry them over
+  (see [Champions](#champions)).
+- **2) Clear & recreate database** – drops and rebuilds the three tables at will
+  (champions are deleted too).
 - **3) Database settings** – host / port / database name / user / password. Writes
   `config/database.ini` (the password is entered with hidden input) and tests the
   connection.
 - **4) Database status** – alive/dead counts per type.
-- **5) Exit** – clears all agents before quitting, as required. `Ctrl+C` does the
-  same thing.
+- **5) Exit** – clears all agents before quitting, but keeps the champion rows
+  so the next run can still carry them over. `Ctrl+C` does the same.
 
 ### Visualisation modes
 
@@ -111,7 +114,9 @@ Database: postgres@localhost:5432/zombie_sim
 The HTML player has play/pause, prev/next, restart, a scrub slider, a speed
 selector (0.5x–16x), and keyboard controls (Space, arrow keys). Humans are blue
 and zombies green; a health bar appears
-over a dot once it is damaged. Every sector in the current round is outlined,
+over a dot once it is damaged. Super agents wear a white ring, champions a
+yellow ring, and an agent that is both wears two concentric rings. Every sector
+in the current round is outlined,
 the active one is highlighted in amber, and faded dots are agents last seen in
 previous sectors. It embeds sampled frames (every `FRAME_INTERVAL` ticks, capped
 at `MAX_FRAMES`, always keeping the first and last), so it works offline and can
@@ -128,7 +133,8 @@ Single-table inheritance, so a subtable row can never disagree with the
 supertable about an agent's type:
 
 ```
-agents   (agent_id PK, agent_type, is_alive, x_pos, y_pos, health, speed)
+agents   (agent_id PK, agent_type, is_alive, x_pos, y_pos, health, speed,
+          is_super, is_champion)
 humans   (agent_id, agent_type='human',  weapon_tier)  -> FK to agents
 zombies  (agent_id, agent_type='zombie', strength)     -> FK to agents
 ```
@@ -136,10 +142,14 @@ zombies  (agent_id, agent_type='zombie', strength)     -> FK to agents
 The subtables reference `agents` through the composite key
 `(agent_id, agent_type)` with `ON DELETE CASCADE`.
 
-Dead agents are **never deleted** – `is_alive` is just set to `false`, so the
-database keeps the full history of the run. They are not loaded back into
-memory and do not appear in the HTML frames; only living agents are read,
-simulated and drawn.
+`is_super` and `is_champion` are stored flags, not inferred from stats: a
+champion's upgraded stat can exceed the normal spawn maximum without being a
+super agent, and a rare agent can be both.
+
+Dead agents are **never deleted during a run** – `is_alive` is just set to
+`false`, so the database keeps the full history of the run. When a run finishes,
+`is_champion` is set to `is_alive` for every row, which makes the living
+survivors the next run's champions and clears the flag from the dead.
 
 Only one simulation can use a database at a time. The app takes a PostgreSQL
 advisory lock for the run and refuses a second run (or a reset) instead of
@@ -206,8 +216,39 @@ Rare **super agents** (default `0.0001` — 1 in 10,000 — per spawned
 agent, either side) get double the spawn-max tier/strength (10) and triple
 the spawn-max health (450 for a human, 600 for a zombie), with speed fixed
 at 3. They use the same combat formulas, so a super human hits for 36–108 at
-30 units. The DB has no super column: a stat above the normal spawn range is
-the marker, and the HTML player draws a yellow ring around them.
+30 units. The stored `is_super` flag is the marker, and the HTML player draws a
+white ring around them.
+
+### Champions
+
+When a run ends, every living agent is flagged `is_champion`. At the start of
+the next interactive run, if any champions exist, the menu asks whether to
+carry them over before it asks for the population:
+
+- **No** — the run behaves exactly as before; the champion rows are cleared.
+- **Yes** — the champion count for each side becomes that side's default and
+  lower bound. Asking for 60 humans when 50 human champions exist spawns 10 new
+  humans and keeps the 50 champions. Batch runs use `--carry-champions` and
+  raise a too-small `--humans` / `--zombies` to the champion minimum.
+
+Promotion, per champion (ordered by `agent_id`):
+
+- health resets to the normal maximum (150 human, 200 zombie),
+- speed and `weapon_tier` / `strength` each gain `1–3` points from
+  `CHAMPION_STAT_UPGRADE_RANGE`,
+- `SUPER_AGENT_CHANCE` is rolled again; a hit replaces the spread with the
+  normal super stats (`450` / `600` health, speed `3`, tier `12` / strength
+  `10`) and keeps both flags,
+- the champion respawns at a fresh random position inside the new map.
+
+Upgrades compound across runs and are deliberately not capped. Champions are
+kept in the `agents` table itself, so carry-over is a stat update, not a copy.
+The champion prompt only appears when a completed run left survivors; an
+aborted run never promotes anyone.
+
+Dead champions lose the flag at the end of the run they die in. `Ctrl+C` and a
+normal exit preserve the flagged champions; **2) Clear & recreate database**
+removes them.
 
 ### End of a sector visit
 
@@ -515,8 +556,8 @@ config/
   db_config.py              reads/writes database.ini, builds psycopg params
   simulation_config.py      every tuning knob (combat, spawning, sectors, visuals)
 db/
-  schema.py                 create/drop/clear the database and tables
-  db_manager.py             load/insert/save agents, bulk writes, status counts
+  schema.py                 create/drop/clear the database and tables (champions)
+  db_manager.py             load/insert/save agents, champions, status counts
 runtime/
   accelerator.py            nearest-enemy backends: python / numpy
   capabilities.py           CPU/GIL probes, worker and backend resolution
@@ -525,7 +566,7 @@ src/
   agent.py                  Agent base class (movement, damage, bounds)
   human.py                  Human subclass (weapon_tier)
   zombie.py                 Zombie subclass (strength)
-  spawner.py                random stat/position generation
+  spawner.py                random stat/position generation, champion promotion
   sector_engine.py          one sector's ticks: plan phases + serial apply
   sector_task.py            picklable worker task: load -> simulate -> save
   tick_executor.py          serial / thread executor for per-tick chunks
@@ -548,9 +589,10 @@ tests/
   test_spatial.py           spatial index vs brute-force reference
   test_movement.py          humans hold at weapon range, simultaneous damage
   test_super_agent.py       super-agent rolls, doubled stats, triple health
+  test_champions.py         survivor promotion, upgrades, super interaction
   test_map_bounds.py        config/schema/spawner map bounds
   test_html_vis.py          frame cap, record budget, prune on finish
-  test_main.py              CLI cap, exit codes, run/reset ordering, EOF exit
+  test_main.py              CLI cap, exit codes, run/reset ordering, champions
   test_db_config.py         blank-password handling and INI warnings
   test_schema.py            ensure_database fast path and CREATE fallback
   test_db_integration.py    opt-in real-PostgreSQL data-layer checks
@@ -619,14 +661,16 @@ SUPER_AGENT_CHANCE = 0.0001   # 1 in 10,000 spawned agents, either side
 SUPER_STAT_MULTIPLIER = 2     # tier / strength above the spawn max
 SUPER_HEALTH_MULTIPLIER = 3   # health above the spawn max
 SUPER_SPEED = 3               # fixed, not doubled
+CHAMPION_STAT_UPGRADE_RANGE = (1, 3)  # speed and tier/strength per carry-over
 
 MAX_AGENTS = 100000           # hard cap on one run's population
 MAX_FRAMES = 2000
 ```
 
 Note: `weapon_tier` and `strength` only have a `>= 1` schema check now; the
-ranges above shape normal spawns, and super agents deliberately exceed them.
-The health and speed ranges only shape new spawns.
+ranges above shape normal spawns, and super agents and champions deliberately
+exceed them. The health and speed ranges only shape new spawns; champion health
+is reset to the range maximum on every carry-over.
 
 ### Map size
 
@@ -648,8 +692,13 @@ Older databases may still carry the fixed `-1000…1000` `CHECK` constraints.
 Bootstrap drops those constraints (leaving every agent row untouched) because a
 static boundary cannot describe a per-run map. The same cleanup drops the old
 bounded `1–5` stat checks, so super agents (tier 12, strength 10) insert
-into an existing database without a reset. Bounds are enforced while spawning,
-saving and moving agents.
+into an existing database without a reset for those bound checks. Bounds are
+enforced while spawning, saving and moving agents.
+
+The `is_super` / `is_champion` columns cannot be added to an existing table by
+`CREATE TABLE IF NOT EXISTS`, so a database created before champions shows the
+missing-column message once; choose **2) Clear & recreate database** to upgrade
+it. That also deletes any champions.
 
 ### Command line
 
@@ -667,6 +716,7 @@ python main.py --run --humans 200 --zombies 200 --seed 7 --backend thread --even
 | --- | --- |
 | `--run` | skip the menu, start immediately |
 | `--humans`, `--zombies`, `--seed` | population and seed for `--run` |
+| `--carry-champions` | carry the previous run's survivors; raises counts to their minimum |
 | `--mode html\|headless` | HTML player (default) or summary only |
 | `--headless` | shorthand for `--mode headless` |
 | `--workers N` | worker threads/processes; `0` = auto |

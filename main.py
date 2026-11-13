@@ -27,7 +27,7 @@ from db.db_manager import DBManager
 from runtime import accelerator as accel_mod
 from runtime.capabilities import VALID_BACKENDS, resolve_plan
 from src.simulation import Simulation
-from src.spawner import generate_spawns
+from src.spawner import generate_spawns, promote_champions
 from utils.sectoring import map_bounds_for, max_sectors_for
 from vis.html_vis import HtmlVisualizer
 
@@ -54,6 +54,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="zombies to spawn (--run)")
     parser.add_argument("--seed", type=int, default=None,
                         help="random seed (--run)")
+    parser.add_argument(
+        "--carry-champions",
+        action="store_true",
+        help=(
+            "carry the previous run's survivors over (--run); counts are "
+            "raised to at least the champion total"
+        ),
+    )
     parser.add_argument(
         "--mode",
         choices=("html", "headless"),
@@ -122,7 +130,7 @@ def print_menu(config: dict) -> None:
     print("  2) Clear & recreate database")
     print("  3) Database settings")
     print("  4) Database status")
-    print("  5) Exit (clears agents)")
+    print("  5) Exit (keeps champions)")
     print()
 
 
@@ -202,6 +210,35 @@ def try_bootstrap(config: dict) -> bool:
     return True
 
 
+def load_champions(config: dict) -> list[dict]:
+    """Read the previous run's survivors.
+
+    Only an old schema (no champion columns) counts as "no champions"; any
+    other database error must reach the caller, because a run that cannot read
+    the champions would otherwise clear them.
+    """
+    db = DBManager(config)
+    try:
+        db.connect()
+        return db.load_champions()
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn):
+        return []
+    finally:
+        db.close()
+
+
+def load_champion_counts(config: dict) -> dict[str, int]:
+    """Count the previous run's survivors by side, without loading the rows."""
+    db = DBManager(config)
+    try:
+        db.connect()
+        return db.count_champions()
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn):
+        return {}
+    finally:
+        db.close()
+
+
 def handle_settings(config: dict) -> dict:
     print()
     print("Database settings (press Enter to keep the current value)")
@@ -244,7 +281,8 @@ def handle_settings(config: dict) -> dict:
 def handle_reset(config: dict) -> None:
     print()
     if not ask_yes_no(
-        "Drop and recreate agents/humans/zombies tables (all agents are lost)?",
+        "Drop and recreate agents/humans/zombies tables "
+        "(all agents and champions are lost)?",
         default=False,
     ):
         print("Cancelled.")
@@ -289,8 +327,11 @@ def handle_exit(config: dict) -> None:
         if not db.try_run_lock():
             print("A simulation is using the database; its agents were left alone.")
             return
-        removed = schema.clear_agents(config)
-        print(f"Cleared {removed} agent(s) from the database. Goodbye.")
+        removed = schema.clear_agents(config, keep_champions=True)
+        print(
+            f"Cleared {removed} agent(s) from the database "
+            "(champions kept for the next run). Goodbye."
+        )
     except psycopg.Error as exc:
         print(f"Could not clear agents: {exc}")
     finally:
@@ -309,15 +350,52 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
     batch = bool(args is not None and args.run)
     print()
 
+    # The carry-over prompt must come before the counts, because the champion
+    # totals become the defaults and the lower bound for each side.
+    carry = bool(getattr(args, "carry_champions", False)) if batch else False
+    counts: dict[str, int] = {}
+    if not batch:
+        counts = load_champion_counts(config)
+        if counts:
+            print(
+                f"Champions from the previous run: "
+                f"{counts.get('human', 0)} human(s), "
+                f"{counts.get('zombie', 0)} zombie(s)."
+            )
+            carry = ask_yes_no("Carry the champions into this run?", default=False)
+
+    # Full rows are only needed once the user has opted in.
+    champions: list[dict] = load_champions(config) if carry else []
+    human_champions = sum(
+        1 for champion in champions if champion["agent_type"] == "human"
+    )
+    zombie_champions = len(champions) - human_champions
+    if human_champions > cfg.MAX_AGENTS or zombie_champions > cfg.MAX_AGENTS:
+        print(
+            f"Too many champions: the limit is {cfg.MAX_AGENTS} per side."
+        )
+        return False
+
     if batch:
-        humans = max(0, args.humans)
-        zombies = max(0, args.zombies)
+        humans = max(max(0, args.humans), human_champions)
+        zombies = max(max(0, args.zombies), zombie_champions)
+        if humans != max(0, args.humans) or zombies != max(0, args.zombies):
+            print(
+                f"  Raised to the champion minimum: "
+                f"{humans} human(s), {zombies} zombie(s)."
+            )
     else:
         humans = ask_int(
-            "Number of humans", default=40, minimum=0, maximum=cfg.MAX_AGENTS
+            "Number of humans",
+            default=human_champions or 40,
+            minimum=human_champions,
+            maximum=cfg.MAX_AGENTS,
         )
         zombies = ask_int(
-            "Number of zombies", default=40, minimum=0, maximum=cfg.MAX_AGENTS
+            "Number of zombies",
+            default=zombie_champions or 40,
+            minimum=zombie_champions,
+            maximum=cfg.MAX_AGENTS,
         )
     total = humans + zombies
     if total == 0:
@@ -400,12 +478,46 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
             return False
         if not try_bootstrap(config):
             return False
-        removed = schema.clear_agents(config)
+        # The prompt ran before the lock, so another process may have changed
+        # the champions since. Carrying promotes the locked rows or nothing;
+        # declining must not clear a set the user never saw.
+        stale = False
+        fresh: list[dict] = []
+        if carry:
+            fresh = db.load_champions()
+            stale = [champion["agent_id"] for champion in fresh] != [
+                champion["agent_id"] for champion in champions
+            ]
+        elif counts:
+            stale = db.count_champions() != counts
+        if stale:
+            print()
+            print(
+                "The champions changed while this run was being set up "
+                "(another run finished or cleared them)."
+            )
+            print("Start the run again to use the current champions.")
+            return False
+        if carry:
+            champions = fresh
+        removed = schema.clear_agents(config, keep_champions=carry)
         if removed:
             print(
                 f"Removed {removed} leftover agent(s) from the previous run.")
 
-        specs = generate_spawns(humans, zombies, rng, map_bounds=map_bounds)
+        # Champions are promoted in place; only the shortfall is newly spawned.
+        promoted = (
+            promote_champions(champions, rng, map_bounds=map_bounds)
+            if carry
+            else []
+        )
+        if promoted:
+            db.save_champion_upgrades(promoted)
+        new_humans = humans - human_champions
+        new_zombies = zombies - zombie_champions
+        specs = generate_spawns(
+            new_humans, new_zombies, rng, map_bounds=map_bounds
+        )
 
         def progress(sector_report, total: int, round_index: int) -> None:
             print(
@@ -432,12 +544,21 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
         )
         # Let worker start-up overlap with the insert instead of delaying the
         # first round (a no-op when the run stays single-threaded).
-        simulation.prewarm(len(specs))
+        simulation.prewarm(total)
         db.insert_agents(specs)
-        print(f"Spawned {humans} human(s) and {zombies} zombie(s).")
+        print(
+            f"Spawned {new_humans} human(s) and {new_zombies} zombie(s)."
+        )
+        if carry:
+            print(
+                f"Carried over {human_champions} human and "
+                f"{zombie_champions} zombie champion(s)."
+            )
 
         report = simulation.run()
         print(report.render())
+        # Survivors become the next run's champions; dead rows lose the flag.
+        db.mark_champions()
 
         if html_visualizer is not None:
             if html_visualizer.frames:

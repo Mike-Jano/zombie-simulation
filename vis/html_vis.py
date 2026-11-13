@@ -77,7 +77,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .dot.human { background: var(--human); box-shadow: 0 0 0 3px var(--human-soft); }
   .dot.zombie { background: var(--zombie); box-shadow: 0 0 0 3px var(--zombie-soft); }
-  .dot.super { background: transparent; border: 2px solid var(--accent); }
+  .dot.super { background: transparent; border: 2px solid #ffffff; }
+  .dot.champion { background: transparent; border: 2px solid var(--accent); }
   .dot.sector { background: var(--accent); border-radius: 2px; }
   .dot.ghost { background: linear-gradient(90deg, var(--human) 0 50%, var(--zombie) 50% 100%);
                opacity: .45; }
@@ -143,16 +144,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="legend">
       <span><span class="dot human"></span>Human</span>
       <span><span class="dot zombie"></span>Zombie</span>
-      <span><span class="dot super"></span>Super (yellow ring)</span>
+      <span><span class="dot super"></span>Super (white ring)</span>
+      <span><span class="dot champion"></span>Champion (yellow ring)</span>
       <span><span class="dot sector"></span>Active sector</span>
       <span><span class="dot ghost"></span>Recently seen (faded)</span>
     </div>
     <p class="tips">
       Blue dots are humans, green dots are zombies; zombies carry an inner ring.
-      Rare super agents keep their side colour inside a yellow ring and are far
-      tougher. Health bars appear once an agent is damaged. Agents only interact
-      inside the active sector (amber). Faint outlines show every sector in the
-      current round, and faded dots are agents last seen in previous sectors.
+      Rare super agents keep their side colour inside a white ring and are far
+      tougher. Champions carried over from a previous run wear a yellow ring; an
+      agent can be both. Health bars appear once an agent is damaged. Agents only
+      interact inside the active sector (amber). Faint outlines show every sector
+      in the current round, and faded dots are agents last seen in previous
+      sectors.
     </p>
   </div>
 </section>
@@ -321,7 +325,7 @@ function roundRect(x, y, w, h, radius) {
 }
 
 function drawAgent(agent, alpha) {
-  const [, type, x, y, hp, , isSuper] = agent;
+  const [, type, x, y, hp, , isSuper, isChampion] = agent;
   const px = sx(x), py = sy(y);
   const style = type === "human" ? AGENT_STYLE.human : AGENT_STYLE.zombie;
   ctx.globalAlpha = alpha;
@@ -357,10 +361,18 @@ function drawAgent(agent, alpha) {
   ctx.fillStyle = "rgba(255,255,255,0.6)";
   ctx.fill();
 
-  // Super agents keep their side colour inside a yellow ring.
+  // Super agents wear a white ring; champions a yellow one. An agent can be
+  // both, so the rare combination gets two concentric rings.
   if (isSuper) {
     ctx.beginPath();
     ctx.arc(px, py, style.radius + 2.6, 0, Math.PI * 2);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+  if (isChampion) {
+    ctx.beginPath();
+    ctx.arc(px, py, style.radius + (isSuper ? 4.4 : 2.6), 0, Math.PI * 2);
     ctx.strokeStyle = "#ffd54f";
     ctx.lineWidth = 1.4;
     ctx.stroke();

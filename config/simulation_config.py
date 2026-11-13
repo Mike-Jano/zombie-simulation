@@ -171,6 +171,16 @@ SUPER_STAT_MULTIPLIER = 2
 SUPER_HEALTH_MULTIPLIER = 3
 SUPER_SPEED = 3
 
+# --------------------------------------------------------------------------- #
+# Champions (survivors carried into the next run)
+# --------------------------------------------------------------------------- #
+# Every living survivor becomes a champion. On carry-over, health is reset to
+# the normal spawn maximum and speed plus weapon tier/strength gain this many
+# points. Upgrades deliberately exceed the normal ranges and compound across
+# runs. A champion also rolls SUPER_AGENT_CHANCE and, if that hits, gets the
+# normal super spread instead.
+CHAMPION_STAT_UPGRADE_RANGE = (1, 3)
+
 # Hard cap on one run's population. The spawn list is built in memory before
 # any database write, so a typo must not be able to exhaust the machine.
 MAX_AGENTS = 100_000

@@ -295,5 +295,67 @@ class DatabaseIntegrationTests(unittest.TestCase):
         self.assertEqual(schema.clear_agents(TEST_CONFIG), 2)
 
 
+    def test_champions_are_marked_loaded_and_survive_a_keep_clear(self):
+        self._insert(2, 2)
+        with DBManager(TEST_CONFIG) as db:
+            rows = db.fetch_alive_agents()
+            humans, zombies = db.load_agents([row[0] for row in rows])
+            for zombie in zombies:
+                zombie.take_damage(10_000)  # leave only the humans alive
+            db.save_agents([*humans, *zombies])
+            db.mark_champions()
+
+            champions = db.load_champions()
+            self.assertEqual(
+                sorted(champion["agent_id"] for champion in champions),
+                sorted(agent.agent_id for agent in humans),
+            )
+            self.assertTrue(all(champion["is_super"] is False for champion in champions))
+            self.assertEqual(db.count_champions(), {"human": 2})
+
+        self.assertEqual(schema.clear_agents(TEST_CONFIG, keep_champions=True), 2)
+        with DBManager(TEST_CONFIG) as db:
+            self.assertEqual(len(db.load_champions()), 2)
+
+    def test_champion_upgrades_are_saved_in_place(self):
+        self._insert(2, 2)
+        with DBManager(TEST_CONFIG) as db:
+            db.mark_champions()
+            champions = db.load_champions()
+            promoted = [
+                {
+                    "agent_id": champion["agent_id"],
+                    "agent_type": champion["agent_type"],
+                    "x_pos": 11,
+                    "y_pos": 22,
+                    "health": 999,
+                    "speed": 9,
+                    "weapon_tier": (champion["weapon_tier"] or 0) + 5,
+                    "strength": (champion["strength"] or 0) + 5,
+                    "is_super": True,
+                }
+                for champion in champions
+            ]
+            self.assertEqual(db.save_champion_upgrades(promoted), 4)
+            stored = {
+                champion["agent_id"]: champion
+                for champion in db.load_champions()
+            }
+            positions = {
+                row[0]: (row[2], row[3]) for row in db.fetch_alive_agents()
+            }
+
+        self.assertEqual(len(stored), 4)
+        for row in promoted:
+            champion = stored[row["agent_id"]]
+            self.assertEqual((champion["health"], champion["speed"]), (999, 9))
+            self.assertTrue(champion["is_super"])
+            self.assertEqual(positions[row["agent_id"]], (11, 22))
+            if row["agent_type"] == "human":
+                self.assertEqual(champion["weapon_tier"], row["weapon_tier"])
+            else:
+                self.assertEqual(champion["strength"], row["strength"])
+
+
 if __name__ == "__main__":
     unittest.main()

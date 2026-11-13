@@ -34,10 +34,12 @@ class SuperSpawnTests(unittest.TestCase):
         self.assertEqual(len(humans), 3)
         self.assertEqual(len(zombies), 4)
         for spec in humans:
+            self.assertTrue(spec["is_super"])
             self.assertEqual(spec["health"], cfg.HUMAN_HEALTH_RANGE[1] * 3)
             self.assertEqual(spec["speed"], cfg.SUPER_SPEED)
             self.assertEqual(spec["weapon_tier"], cfg.HUMAN_WEAPON_TIER_RANGE[1] * 2)
         for spec in zombies:
+            self.assertTrue(spec["is_super"])
             self.assertEqual(spec["health"], cfg.ZOMBIE_HEALTH_RANGE[1] * 3)
             self.assertEqual(spec["speed"], cfg.SUPER_SPEED)
             self.assertEqual(spec["strength"], cfg.ZOMBIE_STRENGTH_RANGE[1] * 2)
@@ -47,6 +49,7 @@ class SuperSpawnTests(unittest.TestCase):
             specs = spawn(20, 20)
 
         for spec in specs:
+            self.assertFalse(spec["is_super"])
             if spec["agent_type"] == "human":
                 self.assertIn(spec["health"], range(*_inclusive(cfg.HUMAN_HEALTH_RANGE)))
                 self.assertIn(spec["speed"], range(*_inclusive(cfg.HUMAN_SPEED_RANGE)))
@@ -67,17 +70,23 @@ def _inclusive(bounds: tuple[int, int]) -> tuple[int, int]:
 
 
 class SuperFlagTests(unittest.TestCase):
-    def test_super_is_inferred_from_stats_above_the_spawn_max(self):
+    def test_super_flag_is_stored_not_inferred(self):
         self.assertFalse(Human(1, "human", True, 0.0, 0.0, 100, 3, 5).is_super)
-        self.assertTrue(Human(2, "human", True, 0.0, 0.0, 450, 3, 10).is_super)
+        self.assertTrue(
+            Human(2, "human", True, 0.0, 0.0, 450, 3, 10, is_super=True).is_super
+        )
         self.assertFalse(Zombie(3, "zombie", True, 0.0, 0.0, 100, 3, 5).is_super)
-        self.assertTrue(Zombie(4, "zombie", True, 0.0, 0.0, 600, 3, 10).is_super)
+        self.assertTrue(
+            Zombie(4, "zombie", True, 0.0, 0.0, 600, 3, 10, is_super=True).is_super
+        )
 
     def test_snapshot_carries_the_super_flag(self):
-        super_human = Human(2, "human", True, 0.0, 0.0, 450, 3, 10)
+        super_human = Human(
+            2, "human", True, 0.0, 0.0, 450, 3, 10, is_super=True
+        )
         normal_zombie = Zombie(3, "zombie", True, 0.0, 0.0, 100, 3, 5)
-        self.assertTrue(super_human.snapshot()[-1])
-        self.assertFalse(normal_zombie.snapshot()[-1])
+        self.assertTrue(super_human.snapshot()[6])
+        self.assertFalse(normal_zombie.snapshot()[6])
 
 
 if __name__ == "__main__":

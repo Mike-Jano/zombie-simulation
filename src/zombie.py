@@ -31,10 +31,5 @@ class Zombie(Agent):
     def can_reach(self, distance: float) -> bool:
         return distance <= self.attack_range
 
-    @property
-    def is_super(self) -> bool:
-        # No DB flag: a strength above the spawn maximum is what marks a super.
-        return self.strength > cfg.ZOMBIE_STRENGTH_RANGE[1]
-
     def roll_damage(self, rng: random.Random) -> int:
         return combat.zombie_damage(self.strength, rng)
