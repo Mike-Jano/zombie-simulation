@@ -1,4 +1,6 @@
 psycopg[binary]>=3.1,<4
+# GUI theme.  Missing at runtime, gui.py falls back to the built-in ttk theme.
+sv-ttk>=2.6
 # Optional: fast CPU nearest-enemy search.  Missing at runtime, the engine
 # falls back to the pure-Python scalar loop.
 numpy>=1.24

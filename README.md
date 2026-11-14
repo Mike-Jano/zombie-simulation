@@ -20,8 +20,8 @@ are written back to the database before being unloaded from memory.
   ```
 
   The `[binary]` extra pulls a prebuilt wheel, so no compiler or local
-  PostgreSQL headers are needed. To install the driver plus the optional
-  accelerator in one go:
+  PostgreSQL headers are needed. To install the driver, the GUI theme and the
+  optional accelerator in one go:
 
   ```
   pip install -r requirements.txt
@@ -29,6 +29,8 @@ are written back to the database before being unloaded from memory.
 - Optional: `numpy` (fast CPU nearest-enemy search). It is in
   `requirements.txt`; without it the simulation runs on the pure-Python scalar
   path.
+- Optional: `sv-ttk` (the Windows 11 look of the GUI). It is in
+  `requirements.txt`; without it the form falls back to the built-in ttk theme.
 
 You do **not** need to create the database by hand. On start-up the app creates
 the `zombie_sim` database and the `agents` / `humans` / `zombies` tables if they
@@ -60,8 +62,9 @@ That is the whole configuration. A few notes:
 - **`dbname` is created automatically** if it does not exist, so it does not
   have to be there yet — your user just needs permission to create databases.
 - **Leave `password` blank** to use trust authentication or a `.pgpass` file.
-- **Menu option 3 ("Database settings")** edits this same file from inside the
-  app, with a hidden password prompt, then verifies the connection.
+- **Menu option 3 ("Database settings")** in `python main.py --menu` edits this
+  same file from inside the app, with a hidden password prompt, then verifies
+  the connection.
 - **The app prints the full path** to this file at the top of every run, and in
   the menu header, so it is always obvious what is being used.
 
@@ -80,7 +83,37 @@ hanging.
 
 ## Using it
 
-Starting `main.py` shows a menu:
+Starting `main.py` opens the GUI:
+
+```
+python main.py
+```
+
+Its form has the same inputs and defaults as the terminal menu, grouped into
+**Previous run**, **Population** and **Output** sections: humans (40), zombies
+(40), HTML or headless, an optional seed, and a checkbox to carry the previous
+run's champions over (disabled when there are none). **Advanced options** (the
+disclosure row) holds the worker/backend/sector/event-shard/accel overrides;
+blank means auto. **Start** is the accent button; Enter starts a run too. The
+grey line at the bottom shows the database connection and whether it is
+reachable.
+
+**Start** begins the run in a worker thread and swaps the window to a
+"Simulating..." screen with a live progress line. The terminal keeps printing
+the run's own output (setup, every sector summary, the final report). When the
+run ends, the window shows the same report with two buttons:
+
+- **New simulation** – back to the input form with fresh champion counts.
+- **Close program** – the same as menu option 5: clears agents, keeps champions.
+
+Closing the window while a run is in progress is refused; close it before
+starting or after the summary.
+
+The terminal menu is still available, including database reset/settings/status:
+
+```
+python main.py --menu
+```
 
 ```
 Database: postgres@localhost:5432/zombie_sim
@@ -222,8 +255,8 @@ white ring around them.
 ### Champions
 
 When a run ends, every living agent is flagged `is_champion`. At the start of
-the next interactive run, if any champions exist, the menu asks whether to
-carry them over before it asks for the population:
+the next interactive run, if any champions exist, the GUI (or the `--menu`
+prompt) asks whether to carry them over before it asks for the population:
 
 - **No** — the run behaves exactly as before; the champion rows are cleared.
 - **Yes** — the champion count for each side becomes that side's default and
@@ -549,7 +582,8 @@ Or run only the data-layer tests against a scratch PostgreSQL with:
 ## Project layout
 
 ```
-main.py                     menu, prompts, run orchestration
+gui.py                      TKinter form, progress screen and summary
+main.py                     run orchestration, terminal menu and prompts
 .gitignore                  ignores venv, caches, output and database.ini
 config/
   database.ini              <-- PostgreSQL login: edit this file
@@ -593,6 +627,7 @@ tests/
   test_map_bounds.py        config/schema/spawner map bounds
   test_html_vis.py          frame cap, record budget, prune on finish
   test_main.py              CLI cap, exit codes, run/reset ordering, champions
+  test_gui.py               form-to-Namespace defaults/validation, window flow
   test_db_config.py         blank-password handling and INI warnings
   test_schema.py            ensure_database fast path and CREATE fallback
   test_db_integration.py    opt-in real-PostgreSQL data-layer checks
@@ -703,10 +738,11 @@ when this message appears, so the reset can be run straight away.
 
 ### Command line
 
-The menu is still the default, but the same run can be started directly — handy
-for benchmarks and for reproducing a run:
+The GUI is the default, the terminal menu is one flag away, and the same run can
+be started directly — handy for benchmarks and for reproducing a run:
 
 ```
+python main.py --menu
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --headless
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --mode html --workers 8
 python main.py --run --humans 1500 --zombies 1500 --seed 7 --sectors 3 --workers 1
@@ -715,7 +751,8 @@ python main.py --run --humans 200 --zombies 200 --seed 7 --backend thread --even
 
 | Flag | Meaning |
 | --- | --- |
-| `--run` | skip the menu, start immediately |
+| `--menu` | terminal menu instead of the GUI |
+| `--run` | skip the GUI/menu, start immediately |
 | `--humans`, `--zombies`, `--seed` | population and seed for `--run` |
 | `--carry-champions` | carry the previous run's survivors; raises counts to their minimum |
 | `--mode html\|headless` | HTML player (default) or summary only |
@@ -737,11 +774,11 @@ not installed in the interpreter you are running. Fix it with:
 pip install "psycopg[binary]"
 ```
 
-This fails at import, before any menu or connection message, so it looks like a
-crash rather than a missing dependency.
+This fails at import, before any window, menu or connection message, so it looks
+like a crash rather than a missing dependency.
 
 **"Could not reach PostgreSQL"** – the server is not running, or the
-credentials are wrong. Use menu option 3, then option 4 to verify.
+credentials are wrong. Use menu option 3 (in `--menu`), then option 4 to verify.
 
 **Login file** – `config/database.ini` is the file to edit; menu option 3
 rewrites it. If you delete it, it is recreated with default values on the next

@@ -1,6 +1,7 @@
 """Entry point for the zombie simulation.
 
-Run with:  python main.py
+Run with:  python main.py        (GUI)
+           python main.py --menu (terminal menu)
 """
 
 from __future__ import annotations
@@ -41,12 +42,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
         description="Zombie simulation (Python + PostgreSQL).",
-        epilog="Run without arguments for the interactive menu.",
+        epilog="Run without arguments for the GUI; --menu for the terminal menu.",
     )
     parser.add_argument(
         "--run",
         action="store_true",
-        help="start a simulation immediately instead of showing the menu",
+        help="start a simulation immediately instead of showing the GUI",
+    )
+    parser.add_argument(
+        "--menu",
+        action="store_true",
+        help="show the terminal menu instead of the GUI",
     )
     parser.add_argument("--humans", type=int, default=40,
                         help="humans to spawn (--run)")
@@ -354,7 +360,24 @@ def handle_exit(config: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Simulation
 # --------------------------------------------------------------------------- #
-def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> bool:
+def describe_progress(sector_report, total: int, round_index: int) -> str:
+    """One progress line, shared by the terminal and the GUI."""
+    return (
+        f"  round {round_index} sector {sector_report.index}/{total}: "
+        f"humans {sector_report.humans_start}->{sector_report.humans_end}, "
+        f"zombies {sector_report.zombies_start}->{sector_report.zombies_end}, "
+        f"{sector_report.iterations} tick(s), "
+        f"{sector_report.stop_reason}"
+    )
+
+
+def handle_simulation(
+    config: dict,
+    args: argparse.Namespace | None = None,
+    progress_cb=None,
+    report_cb=None,
+    champion_counts: dict[str, int] | None = None,
+) -> bool:
     # The database must exist before DBManager.connect(); the rest of the DDL
     # runs after the run lock is held so a second starter cannot race it.
     if not ensure_database(config):
@@ -366,7 +389,9 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
     # The carry-over prompt must come before the counts, because the champion
     # totals become the defaults and the lower bound for each side.
     carry = bool(getattr(args, "carry_champions", False)) if batch else False
-    counts: dict[str, int] = {}
+    # None means "nothing was shown to the user"; an empty dict means the
+    # champions were read and there were none, which is still worth re-checking.
+    counts: dict[str, int] | None = None
     if not batch:
         counts = load_champion_counts(config)
         if counts:
@@ -376,6 +401,10 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
                 f"{counts.get('zombie', 0)} zombie(s)."
             )
             carry = ask_yes_no("Carry the champions into this run?", default=False)
+    elif champion_counts is not None:
+        # The GUI's form showed these counts; the lock check below must compare
+        # them, because the GUI run does not read the champions itself.
+        counts = champion_counts
 
     # Full rows are only needed once the user has opted in.
     champions: list[dict] = load_champions(config) if carry else []
@@ -501,7 +530,7 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
             stale = [champion["agent_id"] for champion in fresh] != [
                 champion["agent_id"] for champion in champions
             ]
-        elif counts:
+        elif counts is not None:
             stale = db.count_champions() != counts
         if stale:
             print()
@@ -533,13 +562,10 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
         )
 
         def progress(sector_report, total: int, round_index: int) -> None:
-            print(
-                f"  round {round_index} sector {sector_report.index}/{total}: "
-                f"humans {sector_report.humans_start}->{sector_report.humans_end}, "
-                f"zombies {sector_report.zombies_start}->{sector_report.zombies_end}, "
-                f"{sector_report.iterations} tick(s), "
-                f"{sector_report.stop_reason}"
-            )
+            line = describe_progress(sector_report, total, round_index)
+            print(line)
+            if progress_cb is not None:
+                progress_cb(line)
 
         simulation = Simulation(
             db,
@@ -570,6 +596,8 @@ def handle_simulation(config: dict, args: argparse.Namespace | None = None) -> b
 
         report = simulation.run()
         print(report.render())
+        if report_cb is not None:
+            report_cb(report)
         # Survivors become the next run's champions; dead rows lose the flag.
         db.mark_champions()
 
@@ -618,6 +646,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if ok else 1
 
     try_bootstrap(config)
+
+    if not args.menu:
+        try:
+            import gui
+        except ImportError:
+            print("tkinter is not available - using the terminal menu.")
+        else:
+            import tkinter as tk
+
+            try:
+                return gui.run_gui(
+                    config,
+                    handle_simulation=handle_simulation,
+                    handle_exit=handle_exit,
+                    load_champion_counts=load_champion_counts,
+                    check_database=check_database,
+                )
+            except tk.TclError:
+                print("No display available - using the terminal menu.")
 
     while True:
         print_menu(config)

@@ -146,9 +146,24 @@ class ExitCodeTests(unittest.TestCase):
             )
             exit_mock = stack.enter_context(patch.object(main, "handle_exit"))
             stack.enter_context(redirect_stdout(io.StringIO()))
-            self.assertEqual(main.main([]), 0)
+            self.assertEqual(main.main(["--menu"]), 0)
 
         exit_mock.assert_called_once()
+
+    def test_plain_launch_hands_over_to_the_gui(self):
+        import gui
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "ensure_config_file"))
+            stack.enter_context(patch.object(main, "print_banner"))
+            stack.enter_context(patch.object(main, "load_db_config", return_value={}))
+            stack.enter_context(patch.object(main, "try_bootstrap"))
+            run_gui = stack.enter_context(
+                patch.object(gui, "run_gui", return_value=7)
+            )
+            self.assertEqual(main.main([]), 7)
+
+        run_gui.assert_called_once()
 
 
 class ResetOrderTests(unittest.TestCase):
@@ -559,6 +574,55 @@ class StaleChampionsTests(unittest.TestCase):
             )
             stack.enter_context(redirect_stdout(io.StringIO()))
             self.assertFalse(main.handle_simulation({}, None))
+
+        clear.assert_not_called()
+
+    def test_gui_counts_changed_after_the_form_aborts_before_clearing(self):
+        class FakeDB:
+            def __init__(self, _config, map_bounds=None):
+                pass
+
+            def connect(self):
+                pass
+
+            def try_run_lock(self):
+                return True
+
+            def count_champions(self):
+                return {"human": 5}  # another run finished while the form was open
+
+            def close(self):
+                pass
+
+        args = argparse.Namespace(
+            run=True,
+            humans=40,
+            zombies=40,
+            seed=1,
+            mode="headless",
+            headless=True,
+            carry_champions=False,
+            workers=1,
+            backend="serial",
+            sectors=None,
+            event_shards=None,
+            accel=None,
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(main, "ensure_database", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(main, "try_bootstrap", return_value=True)
+            )
+            stack.enter_context(patch.object(main, "DBManager", FakeDB))
+            clear = stack.enter_context(
+                patch.object(main.schema, "clear_agents")
+            )
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertFalse(
+                main.handle_simulation({}, args, champion_counts={"human": 2})
+            )
 
         clear.assert_not_called()
 
